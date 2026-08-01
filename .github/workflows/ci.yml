@@ -79,7 +79,16 @@ jobs:
       - name: Build the embedded Linux release binary
         run: VERSION=ci bash build.sh
       - name: Assert release binary metadata
-        run: go run ./scripts/assert_release_binary.go build/icloud-hme
+        shell: bash
+        run: |
+          if output="$(go run ./scripts/assert_release_binary.go build/icloud-hme 2>&1)"; then
+            printf '%s\n' "$output"
+          else
+            printf '%s\n' "$output"
+            error_message="${output//$'\n'/ }"
+            echo "::error title=Release binary metadata verification failed::$error_message"
+            exit 1
+          fi
       - name: Plant stale embedded asset sentinel
         run: |
           printf 'stale embedded asset sentinel\n' > internal/webui/dist/assets/ci-stale-sentinel.js
