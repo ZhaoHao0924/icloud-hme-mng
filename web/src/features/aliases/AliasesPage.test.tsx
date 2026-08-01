@@ -420,8 +420,8 @@ describe("AliasesPage", () => {
       from: "/accounts/acc_primary/aliases?status=active&q=GitHub",
       reason: "icloud_session_expired",
     });
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "更新 Cookie 或重新登录后将返回原页面。",
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("更新 Cookie 或重新登录后将返回原页面。"),
     );
   });
 });
