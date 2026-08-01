@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"icloud-hme/internal/hme"
 )
@@ -681,5 +682,86 @@ func writeAccountConfig(t *testing.T, dataDir, config string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dataDir, "accounts.json"), []byte(config), 0600); err != nil {
 		t.Fatalf("write accounts.json: %v", err)
+	}
+}
+
+func TestAliasAutomationPersistsConfigurationAndRunStatus(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	now := time.Date(2026, time.August, 2, 9, 30, 0, 0, time.FixedZone("CST", 8*60*60))
+	automation := DefaultAliasAutomation()
+	automation.Enabled = true
+	automation.IntervalMinutes = 30
+	automation.ScheduledBatchSize = 2
+	automation.MinimumActive = 5
+	automation.TargetActive = 8
+	automation.MaxBatchSize = 4
+	automation.LabelPrefix = "  自动创建  "
+
+	saved, err := mgr.SetAliasAutomation("acc_cookie", automation, now)
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	if saved.LabelPrefix != "自动创建" {
+		t.Errorf("LabelPrefix = %q, want trimmed value", saved.LabelPrefix)
+	}
+	if saved.NextRunAt != now.Add(30*time.Minute).Format(time.RFC3339) {
+		t.Errorf("NextRunAt = %q, want %q", saved.NextRunAt, now.Add(30*time.Minute).Format(time.RFC3339))
+	}
+
+	runAt := now.Add(5 * time.Minute)
+	run, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 3,
+		Created:       4,
+		Error:         "上游创建失败，已停止后续创建",
+		Status:        AliasAutomationStatusPartial,
+	}, runAt)
+	if err != nil {
+		t.Fatalf("RecordAliasAutomationRun() error = %v", err)
+	}
+	if run.LastStatus != AliasAutomationStatusPartial || run.LastActive != 3 || run.LastCreated != 4 {
+		t.Errorf("unexpected run status: %+v", run)
+	}
+	if run.NextRunAt != runAt.Add(30*time.Minute).Format(time.RFC3339) {
+		t.Errorf("run NextRunAt = %q, want %q", run.NextRunAt, runAt.Add(30*time.Minute).Format(time.RFC3339))
+	}
+
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	reloaded, err := mgr.GetAliasAutomation("acc_cookie")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() error = %v", err)
+	}
+	if reloaded != run {
+		t.Errorf("reloaded automation = %+v, want %+v", reloaded, run)
+	}
+}
+
+func TestAliasAutomationValidationAndDisabledSchedule(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	now := time.Date(2026, time.August, 2, 9, 30, 0, 0, time.UTC)
+	invalid := DefaultAliasAutomation()
+	invalid.Enabled = true
+	if _, err := mgr.SetAliasAutomation("acc_cookie", invalid, now); err == nil {
+		t.Fatal("SetAliasAutomation() error = nil, want enabled rule validation error")
+	}
+
+	valid := DefaultAliasAutomation()
+	valid.MinimumActive = 2
+	valid.TargetActive = 4
+	saved, err := mgr.SetAliasAutomation("acc_cookie", valid, now)
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	if saved.NextRunAt != "" {
+		t.Errorf("disabled NextRunAt = %q, want empty", saved.NextRunAt)
+	}
+
+	configured, err := mgr.GetAliasAutomation("acc_cookie")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() error = %v", err)
+	}
+	if configured.MinimumActive != 2 || configured.TargetActive != 4 || configured.Enabled {
+		t.Errorf("unexpected stored disabled configuration: %+v", configured)
 	}
 }

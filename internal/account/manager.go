@@ -24,20 +24,21 @@ import (
 
 // Account 描述一个 iCloud 账号。
 type Account struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	RealEmail     string            `json:"real_email"`
-	ICloudEmail   string            `json:"icloud_email"`
-	Cookies       map[string]string `json:"cookies"`
-	Host          string            `json:"host"`
-	Proxy         string            `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
-	AppPassword   string            `json:"app_password,omitempty"`
-	Status        string            `json:"status"` // pending / active / error
-	AliasTotal    int               `json:"alias_total"`
-	AliasActive   int               `json:"alias_active"`
-	LastValidated string            `json:"last_validated"`
-	LastError     string            `json:"last_error,omitempty"`
-	CreatedAt     string            `json:"created_at"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	RealEmail       string            `json:"real_email"`
+	ICloudEmail     string            `json:"icloud_email"`
+	Cookies         map[string]string `json:"cookies"`
+	Host            string            `json:"host"`
+	Proxy           string            `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
+	AppPassword     string            `json:"app_password,omitempty"`
+	Status          string            `json:"status"` // pending / active / error
+	AliasTotal      int               `json:"alias_total"`
+	AliasActive     int               `json:"alias_active"`
+	LastValidated   string            `json:"last_validated"`
+	LastError       string            `json:"last_error,omitempty"`
+	CreatedAt       string            `json:"created_at"`
+	AliasAutomation *AliasAutomation  `json:"alias_automation,omitempty"`
 }
 
 type accountConfig struct {
@@ -275,6 +276,13 @@ func decodeAccountConfig(raw []byte) (map[string]*Account, error) {
 		if err := validateCookieCount(acc.Cookies); err != nil {
 			return nil, fmt.Errorf("解析账户配置 accounts[%d]: %w", i, err)
 		}
+		if acc.AliasAutomation != nil {
+			automation, err := normalizeStoredAliasAutomation(*acc.AliasAutomation)
+			if err != nil {
+				return nil, fmt.Errorf("解析账户配置 accounts[%d] alias_automation: %w", i, err)
+			}
+			acc.AliasAutomation = &automation
+		}
 		byID[acc.ID] = acc
 	}
 	return byID, nil
@@ -301,6 +309,7 @@ func cloneAccount(acc *Account) *Account {
 	}
 	cloned := *acc
 	cloned.Cookies = cloneCookies(acc.Cookies)
+	cloned.AliasAutomation = cloneAliasAutomation(acc.AliasAutomation)
 	return &cloned
 }
 
@@ -479,7 +488,7 @@ func (m *Manager) ListAccounts() []AccountDTO {
 func (m *Manager) HMEClient(id string, verbose bool) (*hme.Client, error) {
 	acc, ok := m.accountSnapshot(id)
 	if !ok {
-		return nil, fmt.Errorf("账号不存在: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, id)
 	}
 	if len(acc.Cookies) == 0 {
 		return nil, fmt.Errorf("账号未配置 Cookie，无法使用 HME 功能")

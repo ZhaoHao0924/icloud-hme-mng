@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError, createApiClient } from "./client";
 import {
   accountsQueryOptions,
+  aliasAutomationQueryOptions,
   aliasesQueryOptions,
   healthQueryOptions,
   inboxQueryOptions,
@@ -18,6 +19,7 @@ describe("query integration", () => {
   it("uses stable query keys with normalized inbox defaults", () => {
     expect(queryKeys.accounts).toEqual(["accounts"]);
     expect(queryKeys.account("acc_primary")).toEqual(["account", "acc_primary"]);
+    expect(queryKeys.aliasAutomation("acc_primary")).toEqual(["alias-automation", "acc_primary"]);
     expect(queryKeys.aliases("acc_primary")).toEqual(["aliases", "acc_primary"]);
     expect(queryKeys.inbox({ accountId: "acc_primary" })).toEqual([
       "inbox",
@@ -32,10 +34,12 @@ describe("query integration", () => {
     const client = createQueryClient();
 
     const accounts = await client.fetchQuery(accountsQueryOptions(testApi));
+    const automation = await client.fetchQuery(aliasAutomationQueryOptions("acc_primary", testApi));
     const aliases = await client.fetchQuery(aliasesQueryOptions("acc_primary", testApi));
     const health = await client.fetchQuery(healthQueryOptions(testApi));
 
     expect(accounts).toEqual(accountFixtures);
+    expect(automation).toMatchObject({ enabled: false, interval_minutes: 60, max_batch_size: 5 });
     expect(aliases).toEqual({
       account_id: "acc_primary",
       aliases: aliasFixtures,

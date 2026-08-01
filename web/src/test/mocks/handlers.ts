@@ -17,6 +17,11 @@ import {
   type MockCreateAccountInput,
 } from "./accountStore";
 import { createMockAliasStore, type MockAliasStore } from "./aliasStore";
+import {
+  createMockAliasAutomationStore,
+  type MockAliasAutomationInput,
+  type MockAliasAutomationStore,
+} from "./aliasAutomationStore";
 
 type ScenarioReader = () => MockScenario;
 
@@ -116,6 +121,7 @@ export function createMockHandlers(
   getScenario: ScenarioReader,
   accountStore: MockAccountStore = createMockAccountStore(),
   aliasStore: MockAliasStore = createMockAliasStore(),
+  automationStore: MockAliasAutomationStore = createMockAliasAutomationStore(),
 ) {
   return [
     http.get("*/api/accounts", () => {
@@ -291,6 +297,152 @@ export function createMockHandlers(
           });
         })(),
       );
+    }),
+    http.get("*/api/accounts/:accountId/alias-automation", ({ params }) => {
+      const failure = failureResponse(getScenario);
+      if (failure) return failure;
+      const accountId = String(params.accountId);
+      if (!accountStore.get(accountId, fixturesForScenario(getScenario()))) {
+        return HttpResponse.json({ message: "账号不存在", success: false }, { status: 404 });
+      }
+      return successResponse(automationStore.get(accountId));
+    }),
+    http.put("*/api/accounts/:accountId/alias-automation", async ({ params, request }) => {
+      const failure = failureResponse(getScenario);
+      if (failure) return failure;
+      const accountId = String(params.accountId);
+      if (!accountStore.get(accountId, fixturesForScenario(getScenario()))) {
+        return HttpResponse.json({ message: "账号不存在", success: false }, { status: 404 });
+      }
+      const body = (await request.json()) as Partial<MockAliasAutomationInput>;
+      if (
+        typeof body.enabled !== "boolean" ||
+        !Number.isInteger(body.interval_minutes) ||
+        !Number.isInteger(body.scheduled_batch_size) ||
+        !Number.isInteger(body.minimum_active) ||
+        !Number.isInteger(body.target_active) ||
+        !Number.isInteger(body.max_batch_size) ||
+        typeof body.label_prefix !== "string"
+      ) {
+        return HttpResponse.json(
+          { message: "参数错误: 自动化规则无效", success: false },
+          { status: 400 },
+        );
+      }
+      const input = body as MockAliasAutomationInput;
+      if (
+        input.interval_minutes < 5 ||
+        input.interval_minutes > 10080 ||
+        input.max_batch_size < 1 ||
+        input.max_batch_size > 20 ||
+        input.scheduled_batch_size < 0 ||
+        input.scheduled_batch_size > input.max_batch_size ||
+        input.minimum_active < 0 ||
+        input.minimum_active > 100 ||
+        input.target_active < input.minimum_active ||
+        input.target_active > 100 ||
+        (input.minimum_active === 0 && input.target_active !== 0) ||
+        (input.enabled && input.scheduled_batch_size === 0 && input.minimum_active === 0) ||
+        Array.from(input.label_prefix.trim()).length > 196
+      ) {
+        return HttpResponse.json(
+          { message: "参数错误: 自动化规则无效", success: false },
+          { status: 400 },
+        );
+      }
+      return successResponse(automationStore.update(accountId, input));
+    }),
+    http.post("*/api/accounts/:accountId/aliases/batch", async ({ params, request }) => {
+      const failure = failureResponse(getScenario);
+      if (failure) return failure;
+      const accountId = String(params.accountId);
+      const body = (await request.json()) as { count?: unknown; label_prefix?: unknown };
+      const count = body.count;
+      const labelPrefix = typeof body.label_prefix === "string" ? body.label_prefix.trim() : "";
+      if (!Number.isInteger(count) || typeof count !== "number" || count < 1 || count > 20) {
+        return HttpResponse.json(
+          { message: "参数错误: count 无效", success: false },
+          { status: 400 },
+        );
+      }
+      if (Array.from(labelPrefix).length > 196) {
+        return HttpResponse.json(
+          { message: "参数错误: label_prefix 无效", success: false },
+          { status: 400 },
+        );
+      }
+      const aliasFailure = aliasAppleServiceFailureResponse(getScenario);
+      if (aliasFailure) return aliasFailure;
+      const sessionFailure = aliasSessionFailureResponse(getScenario, accountStore, accountId);
+      if (sessionFailure) return sessionFailure;
+      const aliases = Array.from({ length: count }, (_, index) =>
+        aliasStore.create({
+          accountId,
+          label: count === 1 || labelPrefix === "" ? labelPrefix : `${labelPrefix} ${index + 1}`,
+        }),
+      );
+      return successResponse({
+        account_id: accountId,
+        aliases,
+        complete: true,
+        created: aliases.length,
+        failed: 0,
+        requested: count,
+      });
+    }),
+    http.post("*/api/accounts/:accountId/alias-automation/run", ({ params }) => {
+      const failure = failureResponse(getScenario);
+      if (failure) return failure;
+      const accountId = String(params.accountId);
+      const aliasFailure = aliasAppleServiceFailureResponse(getScenario);
+      if (aliasFailure) return aliasFailure;
+      const sessionFailure = aliasSessionFailureResponse(getScenario, accountStore, accountId);
+      if (sessionFailure) return sessionFailure;
+      const automation = automationStore.get(accountId);
+      if (automation.scheduled_batch_size === 0 && automation.minimum_active === 0) {
+        return HttpResponse.json(
+          { message: "请先配置定时创建数量或库存阈值", success: false },
+          { status: 400 },
+        );
+      }
+      const activeBefore = aliasStore
+        .list(accountId, aliasFixturesForScenario(getScenario()))
+        .filter((alias) => alias.active).length;
+      const replenish =
+        automation.minimum_active > 0 && activeBefore < automation.minimum_active
+          ? automation.target_active - activeBefore
+          : 0;
+      const requested = Math.min(
+        automation.max_batch_size,
+        Math.max(automation.scheduled_batch_size, replenish),
+      );
+      const aliases = Array.from({ length: requested }, (_, index) =>
+        aliasStore.create({
+          accountId,
+          label:
+            requested === 1 || automation.label_prefix === ""
+              ? automation.label_prefix
+              : `${automation.label_prefix} ${index + 1}`,
+        }),
+      );
+      const status = requested === 0 ? "skipped" : "success";
+      const updatedAutomation = automationStore.recordRun(accountId, {
+        active: activeBefore + aliases.length,
+        created: aliases.length,
+        status,
+      });
+      return successResponse({
+        account_id: accountId,
+        active_before: activeBefore,
+        aliases,
+        automation: updatedAutomation,
+        complete: true,
+        created: aliases.length,
+        failed: 0,
+        requested,
+        status,
+        trigger: "manual",
+      });
     }),
     http.get("*/api/aliases", ({ request }) => {
       const accountId = new URL(request.url).searchParams.get("account_id") ?? "";

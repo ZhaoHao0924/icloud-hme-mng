@@ -26,6 +26,22 @@ const accountFixture = {
   status: "active",
 };
 
+const aliasAutomationFixture = {
+  enabled: true,
+  interval_minutes: 60,
+  label_prefix: "自动补充",
+  last_active: 6,
+  last_created: 2,
+  last_error: "",
+  last_run_at: "2026-08-01T09:00:00Z",
+  last_status: "success",
+  max_batch_size: 5,
+  minimum_active: 4,
+  next_run_at: "2026-08-01T10:00:00Z",
+  scheduled_batch_size: 2,
+  target_active: 6,
+};
+
 function jsonResponse(payload: unknown, status = 200) {
   return {
     json: async () => payload,
@@ -148,6 +164,105 @@ describe("API client", () => {
         body: JSON.stringify({ account_id: "acc_main", label: "新闻订阅" }),
         method: "POST",
       }),
+    );
+  });
+
+  it("serializes automation rules and validates the returned schedule", async () => {
+    const fetcher = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse({
+          data: aliasAutomationFixture,
+          success: true,
+        }),
+      ),
+    );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await expect(
+      client.updateAliasAutomation("account / id", {
+        enabled: true,
+        intervalMinutes: 60,
+        labelPrefix: "自动补充",
+        maxBatchSize: 5,
+        minimumActive: 4,
+        scheduledBatchSize: 2,
+        targetActive: 6,
+      }),
+    ).resolves.toEqual(aliasAutomationFixture);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/accounts/account%20%2F%20id/alias-automation",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const [, requestOptions] =
+      (fetcher.mock.calls as unknown as Array<[string, RequestInit]>)[0] ?? [];
+    expect(JSON.parse(String(requestOptions?.body))).toEqual({
+      enabled: true,
+      interval_minutes: 60,
+      label_prefix: "自动补充",
+      max_batch_size: 5,
+      minimum_active: 4,
+      scheduled_batch_size: 2,
+      target_active: 6,
+    });
+  });
+
+  it("uses account-scoped paths for batch creation and rule execution", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            account_id: "account / id",
+            aliases: [
+              {
+                account_id: "account / id",
+                created_at: "2026-08-01T09:00:00Z",
+                email: "new-alias@icloud.com",
+                label: "批量 1",
+              },
+            ],
+            complete: true,
+            created: 1,
+            failed: 0,
+            requested: 1,
+          },
+          success: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            account_id: "account / id",
+            active_before: 4,
+            aliases: [],
+            automation: aliasAutomationFixture,
+            complete: true,
+            created: 0,
+            failed: 0,
+            requested: 0,
+            status: "skipped",
+            trigger: "manual",
+          },
+          success: true,
+        }),
+      );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await client.createAliasesBatch("account / id", { count: 1, labelPrefix: "批量" });
+    await client.runAliasAutomation("account / id");
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/accounts/account%20%2F%20id/aliases/batch",
+      expect.objectContaining({
+        body: JSON.stringify({ count: 1, label_prefix: "批量" }),
+        method: "POST",
+      }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      "/api/accounts/account%20%2F%20id/alias-automation/run",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 

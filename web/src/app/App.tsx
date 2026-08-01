@@ -16,6 +16,9 @@ function pageTitle(pathname: string) {
   if (pathname.endsWith("/aliases")) {
     return "别名";
   }
+  if (pathname.endsWith("/automation")) {
+    return "自动化";
+  }
   if (pathname.endsWith("/inbox")) {
     return "收件箱";
   }

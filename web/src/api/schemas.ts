@@ -56,6 +56,54 @@ export const createdAliasSchema = z
   })
   .strip();
 
+export const aliasAutomationStatusSchema = z.enum(["success", "partial", "skipped", "error"]);
+
+export const aliasAutomationSchema = z
+  .object({
+    enabled: z.boolean(),
+    interval_minutes: z.number().int().min(5).max(10080),
+    scheduled_batch_size: z.number().int().min(0).max(20),
+    minimum_active: z.number().int().min(0).max(100),
+    target_active: z.number().int().min(0).max(100),
+    max_batch_size: z.number().int().min(1).max(20),
+    label_prefix: z.string().max(196),
+    last_run_at: z.string().optional().default(""),
+    next_run_at: z.string().optional().default(""),
+    last_status: aliasAutomationStatusSchema.optional().or(z.literal("")).default(""),
+    last_active: z.number().int().nonnegative(),
+    last_created: z.number().int().nonnegative(),
+    last_error: z.string().optional().default(""),
+  })
+  .strip();
+
+export const aliasBatchResultSchema = z
+  .object({
+    account_id: z.string().min(1),
+    aliases: z.array(createdAliasSchema),
+    complete: z.boolean(),
+    created: z.number().int().nonnegative(),
+    error: z.string().optional().default(""),
+    failed: z.number().int().nonnegative(),
+    requested: z.number().int().positive(),
+  })
+  .strip();
+
+export const aliasAutomationRunSchema = z
+  .object({
+    account_id: z.string().min(1),
+    active_before: z.number().int().nonnegative(),
+    aliases: z.array(createdAliasSchema),
+    automation: aliasAutomationSchema,
+    complete: z.boolean(),
+    created: z.number().int().nonnegative(),
+    error: z.string().optional().default(""),
+    failed: z.number().int().nonnegative(),
+    requested: z.number().int().nonnegative(),
+    status: aliasAutomationStatusSchema,
+    trigger: z.enum(["manual", "scheduled"]),
+  })
+  .strip();
+
 export const aliasActionSchema = z
   .object({
     anonymous_id: z.string().min(1),
@@ -126,6 +174,9 @@ export type Alias = z.infer<typeof aliasSchema>;
 export type AliasAction = z.infer<typeof aliasActionSchema>;
 export type Aliases = z.infer<typeof aliasesSchema>;
 export type CreatedAlias = z.infer<typeof createdAliasSchema>;
+export type AliasAutomation = z.infer<typeof aliasAutomationSchema>;
+export type AliasAutomationRun = z.infer<typeof aliasAutomationRunSchema>;
+export type AliasBatchResult = z.infer<typeof aliasBatchResultSchema>;
 export type DeletedAccount = z.infer<typeof deletedAccountSchema>;
 export type DeletedAlias = z.infer<typeof deletedAliasSchema>;
 export type Health = z.infer<typeof healthSchema>;

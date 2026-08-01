@@ -1,4 +1,4 @@
-import { ArrowLeft, AtSign, Inbox, KeyRound } from "lucide-react";
+import { ArrowLeft, AtSign, Bot, Inbox, KeyRound } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router-dom";
@@ -12,6 +12,7 @@ import { accountStatusMeta } from "./accountPresentation";
 
 const detailTabs = [
   { icon: AtSign, label: "别名", segment: "aliases" },
+  { icon: Bot, label: "自动化", segment: "automation" },
   { icon: Inbox, label: "收件箱", segment: "inbox" },
   { icon: KeyRound, label: "凭据", segment: "security" },
 ] as const;

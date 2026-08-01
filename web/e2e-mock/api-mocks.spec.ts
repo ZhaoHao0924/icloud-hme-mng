@@ -1087,3 +1087,55 @@ test("account deletion confirms, refreshes the list, and announces success", asy
   await expect(page.getByRole("status")).toContainText("主账号");
   await expect(dialog).toHaveCount(0);
 });
+
+test("alias automation saves rules, creates aliases, and fits responsive baselines", async ({
+  page,
+}) => {
+  await page.goto("/accounts/acc_primary/automation?mock=success");
+  await waitForMockWorker(page, "自动化");
+
+  await expect(page.getByRole("heading", { level: 3, name: "别名自动化" })).toBeVisible();
+  const detailNavigation = page.getByRole("navigation", { name: "主账号详情导航" });
+  await expect(detailNavigation.getByRole("link", { name: "自动化" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+
+  const enabled = page.getByLabel("启用自动化规则");
+  await enabled.check();
+  await page.getByLabel("定时创建数量").fill("2");
+  await page.getByRole("button", { name: "保存规则" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "自动化规则已保存" })).toBeVisible();
+  await expect(enabled).toBeChecked();
+
+  await page.getByRole("button", { name: "立即执行规则" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "自动化规则已执行" })).toContainText(
+    "已创建 2 个别名",
+  );
+
+  await page.getByRole("button", { name: "批量创建" }).click();
+  const dialog = page.getByRole("dialog", { name: "批量创建别名" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("创建数量").fill("3");
+  await dialog.getByRole("button", { name: "创建别名" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "批量创建已完成" })).toContainText(
+    "已创建 3 个别名",
+  );
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const dimensions = await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }));
+    expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+    await expect(page.getByRole("heading", { level: 3, name: "别名自动化" })).toBeVisible();
+    await expect(page.getByLabel("执行间隔（分钟）")).toBeVisible();
+    await expect(page.getByRole("button", { name: "批量创建" })).toBeVisible();
+  }
+});

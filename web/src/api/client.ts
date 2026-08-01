@@ -4,6 +4,9 @@ import { getApiToken } from "./apiTokenSession";
 import {
   accountSchema,
   aliasActionSchema,
+  aliasAutomationRunSchema,
+  aliasAutomationSchema,
+  aliasBatchResultSchema,
   aliasesSchema,
   apiEnvelopeSchema,
   createdAliasSchema,
@@ -15,6 +18,9 @@ import {
   reloadedConfigSchema,
   type Account,
   type AliasAction,
+  type AliasAutomation,
+  type AliasAutomationRun,
+  type AliasBatchResult,
   type Aliases,
   type CreatedAlias,
   type DeletedAccount,
@@ -71,6 +77,21 @@ export type CreateAccountInput = {
 export type CreateAliasInput = {
   accountId: string;
   label?: string;
+};
+
+export type CreateAliasesBatchInput = {
+  count: number;
+  labelPrefix?: string;
+};
+
+export type AliasAutomationInput = {
+  enabled: boolean;
+  intervalMinutes: number;
+  scheduledBatchSize: number;
+  minimumActive: number;
+  targetActive: number;
+  maxBatchSize: number;
+  labelPrefix: string;
 };
 
 export type InboxQuery = {
@@ -335,6 +356,23 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    createAliasesBatch(
+      accountId: string,
+      input: CreateAliasesBatchInput,
+      requestOptions?: ApiRequestOptions,
+    ) {
+      return request({
+        body: {
+          count: input.count,
+          label_prefix: input.labelPrefix,
+        },
+        method: "POST",
+        path: endpointPath("accounts", accountId, "aliases", "batch"),
+        responseSchema: aliasBatchResultSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     deactivateAlias(accountId: string, aliasId: string, requestOptions?: ApiRequestOptions) {
       return request({
         body: { account_id: accountId },
@@ -369,6 +407,15 @@ export function createApiClient(options: ApiClientOptions = {}) {
         method: "GET",
         path: "health",
         responseSchema: healthSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    getAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: endpointPath("accounts", accountId, "alias-automation"),
+        responseSchema: aliasAutomationSchema,
         signal: requestOptions?.signal,
       });
     },
@@ -414,6 +461,15 @@ export function createApiClient(options: ApiClientOptions = {}) {
         method: "POST",
         path: endpointPath("aliases", aliasId, "reactivate"),
         responseSchema: aliasActionSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    runAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: endpointPath("accounts", accountId, "alias-automation", "run"),
+        responseSchema: aliasAutomationRunSchema,
         signal: requestOptions?.signal,
       });
     },
@@ -468,6 +524,28 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    updateAliasAutomation(
+      accountId: string,
+      input: AliasAutomationInput,
+      requestOptions?: ApiRequestOptions,
+    ) {
+      return request({
+        body: {
+          enabled: input.enabled,
+          interval_minutes: input.intervalMinutes,
+          scheduled_batch_size: input.scheduledBatchSize,
+          minimum_active: input.minimumActive,
+          target_active: input.targetActive,
+          max_batch_size: input.maxBatchSize,
+          label_prefix: input.labelPrefix,
+        },
+        method: "PUT",
+        path: endpointPath("accounts", accountId, "alias-automation"),
+        responseSchema: aliasAutomationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     verifyLogin(
       accountId: string,
       challengeId: string,
@@ -494,6 +572,9 @@ export type ApiClient = ReturnType<typeof createApiClient>;
 export type {
   Account,
   AliasAction,
+  AliasAutomation,
+  AliasAutomationRun,
+  AliasBatchResult,
   Aliases,
   CreatedAlias,
   DeletedAccount,

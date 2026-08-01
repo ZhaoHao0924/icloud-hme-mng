@@ -36,6 +36,14 @@ export const routes: RouteObject[] = [
             },
           },
           {
+            path: "automation",
+            lazy: async () => {
+              const { AliasAutomationPage } =
+                await import("../features/automation/AliasAutomationPage");
+              return { Component: AliasAutomationPage };
+            },
+          },
+          {
             path: "inbox",
             lazy: async () => {
               const { InboxPage } = await import("../features/inbox/InboxPage");

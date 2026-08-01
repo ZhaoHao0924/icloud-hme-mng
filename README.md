@@ -486,6 +486,19 @@ DELETE /api/aliases/:id
 }
 ```
 
+### 别名自动化
+
+账户详情页新增“自动化”标签页，可完成以下操作：
+
+- 一次批量创建 `1..20` 个别名
+- 按固定间隔定时创建指定数量
+- 当活跃别名低于库存阈值时自动补充到目标数量
+- 查看最近一次执行结果、下次执行时间与错误摘要，并可立即执行已保存的规则
+
+规则按账户保存在 `accounts.json` 的 `alias_automation` 字段中。服务运行时每分钟检查到期规则，服务重启后会继续使用已保存的执行状态。单账户的手动创建、批量创建和自动化创建会串行执行，避免并发操作覆盖刷新后的 Cookie。
+
+批量接口为 `POST /api/accounts/:id/aliases/batch`，规则接口为 `GET`/`PUT /api/accounts/:id/alias-automation`，立即执行接口为 `POST /api/accounts/:id/alias-automation/run`。完整字段和响应契约见 [API.md](API.md#13-批量创建别名)。
+
 ## 认证方式
 
 ### 方式一: Cookie 认证 (推荐,功能最完整)
@@ -668,7 +681,8 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 
 ### Features
 
-- Create HME aliases automatically
+- Create individual or batched HME aliases
+- Schedule per-account alias creation and replenish active alias inventory by threshold
 - List all aliases for an account
 - Read emails sent to HME aliases via IMAP or the iCloud Web API
 - Manage multiple iCloud accounts
@@ -745,7 +759,9 @@ Pull requests and pushes to `main` run Go race tests, frontend regression tests,
 
 Create `data/accounts.json` using the canonical array schema in `accounts.json.template`, then start the server. Cookie values must be an object keyed by cookie name, and `app_password` is a single string. Legacy account-map files are accepted and rewritten to the canonical array format on the next save. The file contains secrets and must not be committed.
 
-API request bodies are limited to 1 MiB. Inbox `limit` accepts 1 through 100, `days` accepts 1 through 365, alias labels accept up to 200 Unicode characters, and each account accepts up to 128 cookies.
+API request bodies are limited to 1 MiB. Inbox `limit` accepts 1 through 100, `days` accepts 1 through 365, alias labels accept up to 200 Unicode characters, batch creation accepts 1 through 20 aliases, and each account accepts up to 128 cookies.
+
+The account Automation tab configures interval-based creation and threshold replenishment. Rules are persisted in `accounts.json`, checked each minute while the service is running, and retain their last/next run state across restarts. Alias operations for each account are serialized so concurrent manual and automated work cannot overwrite refreshed cookies. See [API.md](API.md#13-批量创建别名) for the request and response contracts.
 
 IMAP inbox queries apply `days` during the server-side search and return messages newest first. Preview fetches use `BODY.PEEK`, read at most the first 64 KiB of each raw message, and return at most 4 KiB of valid UTF-8 without marking messages as read.
 

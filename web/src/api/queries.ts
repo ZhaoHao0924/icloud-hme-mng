@@ -18,6 +18,7 @@ function normalizedInboxQuery(query: InboxQuery) {
 export const queryKeys = {
   account: (accountId: string) => ["account", accountId] as const,
   accounts: ["accounts"] as const,
+  aliasAutomation: (accountId: string) => ["alias-automation", accountId] as const,
   aliases: (accountId: string) => ["aliases", accountId] as const,
   health: ["health"] as const,
   inbox: (query: InboxQuery) => {
@@ -44,6 +45,14 @@ export function aliasesQueryOptions(accountId: string, client: ApiClient = api) 
     enabled: accountId !== "",
     queryFn: ({ signal }) => client.listAliases(accountId, { signal }),
     queryKey: queryKeys.aliases(accountId),
+  });
+}
+
+export function aliasAutomationQueryOptions(accountId: string, client: ApiClient = api) {
+  return queryOptions({
+    enabled: accountId !== "",
+    queryFn: ({ signal }) => client.getAliasAutomation(accountId, { signal }),
+    queryKey: queryKeys.aliasAutomation(accountId),
   });
 }
 

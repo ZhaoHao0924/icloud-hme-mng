@@ -647,6 +647,86 @@ Content-Type: application/json
 
 ---
 
+### 13. 批量创建别名
+
+```http
+POST /api/accounts/:id/aliases/batch
+Content-Type: application/json
+
+{
+  "count": 3,
+  "label_prefix": "注册"
+}
+```
+
+`count` 必须为 `1..20`。`label_prefix` 可选，最多 196 个 Unicode 字符；当一次创建多个别名且设置了前缀时，服务会依次使用 `注册 1`、`注册 2` 等标签。
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_id": "acc_1",
+    "requested": 3,
+    "created": 3,
+    "failed": 0,
+    "complete": true,
+    "aliases": [
+      {
+        "account_id": "acc_1",
+        "email": "abc123@icloud.com",
+        "label": "注册 1",
+        "created_at": "2026-08-02T09:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+遇到上游创建失败时，服务会停止后续创建。若已成功创建部分别名，仍返回 `200` 和 `complete: false`，并通过 `created`、`failed`、`error` 表示结果；首个创建即失败时返回相应的 `401` 或 `502` 错误。
+
+### 14. 别名自动化规则
+
+自动化规则按账户保存在 `accounts.json` 的 `alias_automation` 字段中。服务进程运行期间会每分钟检查一次到期规则；重启后会继续使用已保存的下一次执行时间。每个账户的创建、批量创建和自动化执行均串行处理，避免并发刷新 Cookie。
+
+```http
+GET /api/accounts/:id/alias-automation
+```
+
+未配置规则时返回安全默认值：`enabled: false`、执行间隔 60 分钟、单次上限 5。
+
+```http
+PUT /api/accounts/:id/alias-automation
+Content-Type: application/json
+
+{
+  "enabled": true,
+  "interval_minutes": 60,
+  "scheduled_batch_size": 2,
+  "minimum_active": 5,
+  "target_active": 8,
+  "max_batch_size": 5,
+  "label_prefix": "自动补充"
+}
+```
+
+字段约束：
+
+- `interval_minutes`: `5..10080`
+- `scheduled_batch_size`: `0..max_batch_size`
+- `minimum_active` 与 `target_active`: `0..100`；启用阈值补货时 `target_active` 不得小于 `minimum_active`
+- `max_batch_size`: `1..20`
+- 启用规则时，至少设置一个大于零的 `scheduled_batch_size` 或 `minimum_active`
+
+每次到期执行时，服务先读取当前活跃别名数：定时创建会请求 `scheduled_batch_size` 个；当活跃数低于 `minimum_active` 时，库存补货会请求补至 `target_active` 的数量。两种规则同时配置时取较大值，再受 `max_batch_size` 限制。
+
+```http
+POST /api/accounts/:id/alias-automation/run
+```
+
+该接口立即按已保存的规则执行一次，并返回 `active_before`、`requested`、`created`、`failed`、`complete`、`status`、新建别名和更新后的 `automation` 状态。`status` 为 `success`、`partial`、`skipped` 或 `error`；执行后会记录 `last_run_at`、`next_run_at`、`last_active`、`last_created` 和脱敏错误摘要。
+
+---
+
 ## 使用示例
 
 ### curl 示例

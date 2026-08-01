@@ -18,11 +18,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"icloud-hme/internal/account"
+	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
 	"icloud-hme/internal/webui"
 )
@@ -50,6 +52,8 @@ type Server struct {
 	loginChallenges     *loginChallengeStore
 	startPasswordLogin  startPasswordLoginFunc
 	verifyPasswordLogin verifyPasswordLoginFunc
+	aliasOperations     *aliasOperationService
+	aliasAutomation     *aliasAutomationService
 }
 
 // New 创建 Server。apiToken 非空时,所有 /api 路由都需要 Bearer Token。
@@ -76,12 +80,15 @@ func NewWithVersion(mgr *account.Manager, debug bool, apiToken, version string) 
 	s.verifyPasswordLogin = func(session *account.PasswordLoginSession, otp string) (account.AccountDTO, error) {
 		return session.Verify(otp)
 	}
+	s.aliasOperations = newAliasOperationService(mgr)
+	s.aliasAutomation = newAliasAutomationService(mgr, s.aliasOperations)
 	if s.authEnabled {
 		s.apiTokenHash = sha256.Sum256([]byte(apiToken))
 	}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.r.Use(securityResponseHeaders)
 	s.register()
+	s.aliasAutomation.Start()
 	return s
 }
 
@@ -92,6 +99,13 @@ func (s *Server) Run(addr string) error {
 
 // Handler 返回底层 gin 引擎(便于测试)。
 func (s *Server) Handler() http.Handler { return s.r }
+
+// Close 停止后台自动化调度器。Run 退出时不需要显式调用；测试和嵌入式使用可调用它释放资源。
+func (s *Server) Close() {
+	if s.aliasAutomation != nil {
+		s.aliasAutomation.Stop()
+	}
+}
 
 func (s *Server) register() {
 	api := s.r.Group("/api")
@@ -109,6 +123,10 @@ func (s *Server) register() {
 		api.PUT("/accounts/:id/cookies", s.updateCookies)
 		api.POST("/accounts/:id/login/start", s.startAccountLogin)
 		api.POST("/accounts/:id/login/verify", s.verifyAccountLogin)
+		api.GET("/accounts/:id/alias-automation", s.getAliasAutomation)
+		api.PUT("/accounts/:id/alias-automation", s.updateAliasAutomation)
+		api.POST("/accounts/:id/alias-automation/run", s.runAliasAutomation)
+		api.POST("/accounts/:id/aliases/batch", s.createAliasesBatch)
 
 		// ===== 核心接口 1: 创建邮箱 =====
 		api.POST("/create", s.createAlias)
@@ -332,20 +350,22 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
-	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	result, err := client.CreateAlias(req.Label, 5)
-
-	// 操作完成后,保存可能已刷新的 Cookie（validate 会轮换 token）
-	if !s.persistClientCookies(c, req.AccountID, client.Cookies) {
-		return
-	}
+	var result *hme.CreateResult
+	err := s.aliasOperations.withClient(req.AccountID, func(client aliasOperationClient) error {
+		var createErr error
+		result, createErr = client.CreateAlias(req.Label, 5)
+		return createErr
+	})
 
 	if err != nil {
+		if errors.Is(err, account.ErrPersistence) {
+			fail(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: "+err.Error())
+			return
+		}
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
 		// 区分会话失效(需重新登录)与临时失败
 		msg := err.Error()
 		if isSessionError(msg) {
@@ -356,11 +376,11 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
-	ok(c, gin.H{
-		"email":      result.Email,
-		"label":      result.Label,
-		"created_at": result.CreatedAt,
-		"account_id": req.AccountID,
+	ok(c, createdAliasData{
+		AccountID: req.AccountID,
+		CreatedAt: result.CreatedAt,
+		Email:     result.Email,
+		Label:     result.Label,
 	})
 }
 
@@ -537,22 +557,140 @@ func (s *Server) updateCookies(c *gin.Context) {
 	ok(c, acc)
 }
 
+type aliasAutomationReq struct {
+	Enabled            bool   `json:"enabled"`
+	IntervalMinutes    int    `json:"interval_minutes"`
+	ScheduledBatchSize int    `json:"scheduled_batch_size"`
+	MinimumActive      int    `json:"minimum_active"`
+	TargetActive       int    `json:"target_active"`
+	MaxBatchSize       int    `json:"max_batch_size"`
+	LabelPrefix        string `json:"label_prefix"`
+}
+
+func (s *Server) getAliasAutomation(c *gin.Context) {
+	automation, err := s.mgr.GetAliasAutomation(c.Param("id"))
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusInternalServerError, "读取自动化规则失败: ", err)
+		return
+	}
+	ok(c, automation)
+}
+
+func (s *Server) updateAliasAutomation(c *gin.Context) {
+	var req aliasAutomationReq
+	if !bindJSON(c, &req, "自动化规则参数无效") {
+		return
+	}
+	automation, err := s.mgr.SetAliasAutomation(c.Param("id"), account.AliasAutomation{
+		Enabled:            req.Enabled,
+		IntervalMinutes:    req.IntervalMinutes,
+		ScheduledBatchSize: req.ScheduledBatchSize,
+		MinimumActive:      req.MinimumActive,
+		TargetActive:       req.TargetActive,
+		MaxBatchSize:       req.MaxBatchSize,
+		LabelPrefix:        req.LabelPrefix,
+	}, time.Now())
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusBadRequest, "", err)
+		return
+	}
+	s.aliasAutomation.Start()
+	ok(c, automation)
+}
+
+func (s *Server) runAliasAutomation(c *gin.Context) {
+	result, err := s.aliasAutomation.RunNow(c.Param("id"))
+	if err == nil || result.Created > 0 {
+		ok(c, result)
+		return
+	}
+	if errors.Is(err, account.ErrAccountNotFound) {
+		fail(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+	if errors.Is(err, account.ErrPersistence) {
+		failAccountOperation(c, http.StatusInternalServerError, "保存自动化运行状态失败: ", err)
+		return
+	}
+	if errors.Is(err, errAliasAutomationRuleMissing) {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if isSessionError(err.Error()) {
+		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
+		return
+	}
+	fail(c, http.StatusBadGateway, "执行自动化规则失败: "+err.Error())
+}
+
+type createAliasesBatchReq struct {
+	Count       int    `json:"count"`
+	LabelPrefix string `json:"label_prefix"`
+}
+
+func (s *Server) createAliasesBatch(c *gin.Context) {
+	var req createAliasesBatchReq
+	if !bindJSON(c, &req, "count 必填") {
+		return
+	}
+	if req.Count < account.MinAliasAutomationBatchSize || req.Count > account.MaxAliasAutomationBatchSize {
+		fail(c, http.StatusBadRequest, fmt.Sprintf("参数错误: count 必须是 %d 到 %d 之间的整数", account.MinAliasAutomationBatchSize, account.MaxAliasAutomationBatchSize))
+		return
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(req.LabelPrefix)) > account.MaxAliasAutomationLabelPrefixRunes {
+		fail(c, http.StatusBadRequest, fmt.Sprintf("参数错误: label_prefix 不能超过 %d 个字符", account.MaxAliasAutomationLabelPrefixRunes))
+		return
+	}
+
+	batch, err := s.aliasOperations.createBatch(c.Param("id"), req.Count, req.LabelPrefix)
+	if err == nil || batch.Created > 0 {
+		ok(c, batch)
+		return
+	}
+	if errors.Is(err, account.ErrAccountNotFound) {
+		fail(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+	if errors.Is(err, account.ErrPersistence) {
+		failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
+		return
+	}
+	if isSessionError(err.Error()) {
+		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
+		return
+	}
+	fail(c, http.StatusBadGateway, "批量创建邮箱失败: "+err.Error())
+}
+
 func (s *Server) listAliases(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
 		return
 	}
-	client, err := s.mgr.HMEClient(accountID, false)
+	var aliases []hme.Alias
+	err := s.aliasOperations.withClient(accountID, func(client aliasOperationClient) error {
+		var listErr error
+		aliases, listErr = client.ListAliases()
+		return listErr
+	})
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-	aliases, err := client.ListAliases()
-	if !s.persistClientCookies(c, accountID, client.Cookies) {
-		return
-	}
-	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, account.ErrPersistence) {
+			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
+			return
+		}
 		if isSessionError(err.Error()) {
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
 		} else {
@@ -578,17 +716,21 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	var success bool
+	err := s.aliasOperations.withClient(req.AccountID, func(client aliasOperationClient) error {
+		var actionErr error
+		success, actionErr = client.DeactivateHME(anonymousID)
+		return actionErr
+	})
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	success, err := client.DeactivateHME(anonymousID)
-	if !s.persistClientCookies(c, req.AccountID, client.Cookies) {
-		return
-	}
-	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, account.ErrPersistence) {
+			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
+			return
+		}
 		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
 		return
 	}
@@ -602,17 +744,21 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	var success bool
+	err := s.aliasOperations.withClient(req.AccountID, func(client aliasOperationClient) error {
+		var actionErr error
+		success, actionErr = client.ReactivateHME(anonymousID)
+		return actionErr
+	})
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	success, err := client.ReactivateHME(anonymousID)
-	if !s.persistClientCookies(c, req.AccountID, client.Cookies) {
-		return
-	}
-	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, account.ErrPersistence) {
+			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
+			return
+		}
 		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
 		return
 	}
@@ -626,18 +772,19 @@ func (s *Server) deleteAlias(c *gin.Context) {
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	err := s.aliasOperations.withClient(req.AccountID, func(client aliasOperationClient) error {
+		return client.Delete(anonymousID)
+	})
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	operationErr := client.Delete(anonymousID)
-	if !s.persistClientCookies(c, req.AccountID, client.Cookies) {
-		return
-	}
-	if operationErr != nil {
-		fail(c, http.StatusBadGateway, "删除失败: "+operationErr.Error())
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, account.ErrPersistence) {
+			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
+			return
+		}
+		fail(c, http.StatusBadGateway, "删除失败: "+err.Error())
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID})
@@ -659,5 +806,6 @@ func (s *Server) reloadConfig(c *gin.Context) {
 		return
 	}
 	s.loginChallenges.invalidateAll()
+	s.aliasAutomation.Start()
 	ok(c, gin.H{"message": "配置已重新加载"})
 }
