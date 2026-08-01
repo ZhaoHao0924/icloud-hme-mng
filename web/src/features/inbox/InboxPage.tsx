@@ -1,6 +1,6 @@
 import { Globe2, Inbox, RefreshCw, Server } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 
 import { isApiError } from "../../api/client";
@@ -131,23 +131,33 @@ export function InboxPage() {
   const selectedAlias = searchParams.get("alias") ?? "";
   const days = parseOption(searchParams.get("days"), dayOptions, 7);
   const limit = parseOption(searchParams.get("limit"), limitOptions, 20);
-  const inboxQuery = useQuery(
-    inboxQueryOptions({ accountId: account.id, alias: selectedAlias, days, limit }),
-  );
-  const accounts = accountsQuery.data ?? [account];
   const aliases = aliasesQuery.data?.aliases ?? [];
+  const selectedAliasExists =
+    selectedAlias === "" || aliases.some(({ email }) => email === selectedAlias);
+  const inboxQueryEnabled =
+    account.id !== "" && (selectedAlias === "" || (aliasesQuery.isSuccess && selectedAliasExists));
+  const inboxQuery = useQuery({
+    ...inboxQueryOptions({ accountId: account.id, alias: selectedAlias, days, limit }),
+    enabled: inboxQueryEnabled,
+  });
+  const accounts = accountsQuery.data ?? [account];
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const messages = inboxQuery.data?.messages ?? [];
   const selectedMessage =
     messages.find((message) => message.id === selectedMessageId) ?? messages[0] ?? null;
-  const selectedAliasExists =
-    selectedAlias === "" || aliases.some(({ email }) => email === selectedAlias);
   const method = inboxQuery.data ? readMethodMeta(inboxQuery.data.method) : null;
   const inboxErrorTitle =
     isApiError(inboxQuery.error) &&
     (inboxQuery.error.kind === "timeout" || inboxQuery.error.status === 504)
       ? "读取邮件超时"
       : "收件箱加载失败";
+
+  useEffect(() => {
+    if (!selectedAlias || !aliasesQuery.isSuccess || selectedAliasExists) return;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("alias");
+    setSearchParams(nextParams, { replace: true });
+  }, [aliasesQuery.isSuccess, searchParams, selectedAlias, selectedAliasExists, setSearchParams]);
 
   function updateAlias(nextAlias: string) {
     const nextParams = new URLSearchParams(searchParams);
@@ -202,7 +212,7 @@ export function InboxPage() {
           <button
             aria-label={inboxQuery.isFetching ? "正在刷新收件箱" : "刷新收件箱"}
             className="icon-button inbox-refresh-button"
-            disabled={inboxQuery.isFetching}
+            disabled={inboxQuery.isFetching || !inboxQueryEnabled}
             title="刷新收件箱"
             type="button"
             onClick={() => void inboxQuery.refetch()}

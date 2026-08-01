@@ -119,6 +119,38 @@ describe("InboxPage", () => {
     expect(screen.queryByRole("list", { name: "邮件摘要列表" })).not.toBeInTheDocument();
   });
 
+  it("clears a stale alias filter before requesting the inbox", async () => {
+    const requests: URL[] = [];
+    server.use(
+      http.get("*/api/inbox", ({ request }) => {
+        const url = new URL(request.url);
+        requests.push(url);
+        return HttpResponse.json({
+          data: {
+            account_id: url.searchParams.get("account_id") ?? "",
+            alias: url.searchParams.get("alias") ?? "",
+            count: inboxMessageFixtures.length,
+            messages: inboxMessageFixtures,
+            method: "web_api",
+          },
+          success: true,
+        });
+      }),
+    );
+    const { router } = renderInbox(
+      "/accounts/acc_primary/inbox?source=workspace&alias=removed-alias%40icloud.com",
+    );
+
+    await screen.findByRole("list", { name: "邮件摘要列表" });
+    await waitFor(() =>
+      expect(new URLSearchParams(router.state.location.search).get("alias")).toBeNull(),
+    );
+    expect(router.state.location.search).toBe("?source=workspace");
+    expect(screen.getByLabelText("别名")).toHaveValue("");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.searchParams.get("alias")).toBe("");
+  });
+
   it("keeps filters visible and retries an inbox fallback error on demand", async () => {
     let shouldFail = true;
     server.use(
