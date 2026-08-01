@@ -94,23 +94,52 @@ func (c *hostScopedAuthClient) SetCookies(u *url.URL, cookies []*http.Cookie) {
 }
 
 func TestAuthenticateWebCopiesIDMSACookiesToWebOrigin(t *testing.T) {
-	for _, host := range []string{"icloud.com", "icloud.com.cn"} {
-		t.Run(host, func(t *testing.T) {
+	for _, tt := range []struct {
+		host        string
+		countryCode string
+	}{
+		{host: "icloud.com", countryCode: "USA"},
+		{host: "icloud.com.cn", countryCode: "CHN"},
+	} {
+		t.Run(tt.host, func(t *testing.T) {
 			httpClient := &hostScopedAuthClient{
 				scriptedAuthClient: scriptedAuthClient{
-					responses: []scriptedAuthResponse{{status: 200, body: `{"dsInfo":{"dsid":"12345"}}`}},
+					responses: []scriptedAuthResponse{{
+						status: 200,
+						body:   `{"dsInfo":{"dsid":"12345"}}`,
+						header: authTestHeader("Set-Cookie", "X-APPLE-WEBAUTH-TOKEN=web-token; Path=/"),
+					}},
 				},
 				cookiesByHost: map[string][]*http.Cookie{
 					"idmsa.apple.com": []*http.Cookie{{Name: "session", Value: "cookie-value"}},
 				},
 			}
-			client := &Client{Host: host, httpc: httpClient}
+			client := &Client{Host: tt.host, httpc: httpClient}
 
 			if err := client.authenticateWeb(&authState{authToken: "auth-token", trustToken: "trust-token"}); err != nil {
 				t.Fatalf("authenticateWeb() error = %v", err)
 			}
-			if got := client.extractSessionCookies()["session"]; got != "cookie-value" {
+			if got := httpClient.requests[0].url; got != "https://setup."+tt.host+"/setup/ws/1/accountLogin" {
+				t.Errorf("account login URL = %q", got)
+			}
+			if got := httpClient.requests[0].header.Get("Origin"); got != "https://www."+tt.host {
+				t.Errorf("account login origin = %q", got)
+			}
+			var body struct {
+				AccountCountryCode string `json:"accountCountryCode"`
+			}
+			if err := json.Unmarshal(httpClient.requests[0].body, &body); err != nil {
+				t.Fatalf("decode account login body: %v", err)
+			}
+			if body.AccountCountryCode != tt.countryCode {
+				t.Errorf("account country code = %q, want %q", body.AccountCountryCode, tt.countryCode)
+			}
+			cookies := client.extractSessionCookies()
+			if got := cookies["session"]; got != "cookie-value" {
 				t.Errorf("web session cookie = %q, want cookie-value", got)
+			}
+			if got := cookies["X-APPLE-WEBAUTH-TOKEN"]; got != "web-token" {
+				t.Errorf("account login cookie = %q, want web-token", got)
 			}
 		})
 	}

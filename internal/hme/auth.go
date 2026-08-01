@@ -33,7 +33,6 @@ const (
 	authOptions     = "https://idmsa.apple.com/appleauth/auth"
 	submitSecurity  = "https://idmsa.apple.com/appleauth/auth/verify/%s/securitycode"
 	authTrust       = "https://idmsa.apple.com/appleauth/auth/2sv/trust"
-	authWebFmt      = "https://setup.icloud.com/setup/ws/1/accountLogin"
 	authValidateFmt = "https://setup.icloud.com/setup/ws/1/validate?clientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s"
 )
 
@@ -461,18 +460,39 @@ func (c *Client) getTrust(state *authState) error {
 	return nil
 }
 
+func (c *Client) accountCountryCode() string {
+	if c.Host == "icloud.com.cn" {
+		return "CHN"
+	}
+	return "USA"
+}
+
 // authenticateWeb 认证 iCloud Web 服务
 func (c *Client) authenticateWeb(state *authState) error {
-	body := fmt.Sprintf(`{"dsWebAuthToken":"%s","accountCountryCode":"USA","extended_login":true,"trustToken":"%s"}`,
-		state.authToken, state.trustToken)
+	payload := struct {
+		DSWebAuthToken     string `json:"dsWebAuthToken"`
+		AccountCountryCode string `json:"accountCountryCode"`
+		ExtendedLogin      bool   `json:"extended_login"`
+		TrustToken         string `json:"trustToken"`
+	}{
+		DSWebAuthToken:     state.authToken,
+		AccountCountryCode: c.accountCountryCode(),
+		ExtendedLogin:      true,
+		TrustToken:         state.trustToken,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 
-	req, err := http.NewRequest("POST", authWebFmt, bytes.NewReader([]byte(body)))
+	req, err := http.NewRequest("POST", c.SetupURL()+"/accountLogin", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", c.Origin())
+	req.Header.Set("Referer", c.Origin()+"/")
 	req.Header.Set("Accept", "*/*")
 
 	resp, err := c.httpc.Do(req)
@@ -492,6 +512,14 @@ func (c *Client) authenticateWeb(state *authState) error {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 	state.dsid = result.DsInfo.Dsid
+	if c.Cookies == nil {
+		c.Cookies = make(map[string]string)
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name != "" && cookie.Value != "" {
+			c.Cookies[cookie.Name] = cookie.Value
+		}
+	}
 
 	// 复制 idmsa.apple.com 的 Cookie 到当前 Web Origin
 	idmsaURL, _ := url.Parse("https://idmsa.apple.com")
@@ -503,10 +531,15 @@ func (c *Client) authenticateWeb(state *authState) error {
 
 // extractSessionCookies 提取 session token Cookie
 func (c *Client) extractSessionCookies() map[string]string {
-	cookies := make(map[string]string)
-	u, _ := url.Parse(c.Origin())
-	for _, cookie := range c.httpc.GetCookies(u) {
-		cookies[cookie.Name] = cookie.Value
+	cookies := cloneCookies(c.Cookies)
+	for _, rawURL := range []string{c.Origin(), c.SetupURL()} {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+		for _, cookie := range c.httpc.GetCookies(u) {
+			cookies[cookie.Name] = cookie.Value
+		}
 	}
 	return cookies
 }

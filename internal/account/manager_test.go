@@ -483,16 +483,18 @@ func TestManagerConcurrentCookieSnapshotsAndSaves(t *testing.T) {
 }
 
 type fakePasswordLoginClient struct {
-	requiresOTP bool
-	startErr    error
-	verifyErr   error
-	cookies     map[string]string
-	username    string
-	password    string
-	otp         string
-	challenge   *hme.LoginChallenge
-	verifyCalls int
-	closeCalls  int
+	requiresOTP   bool
+	startErr      error
+	verifyErr     error
+	cookies       map[string]string
+	username      string
+	password      string
+	otp           string
+	challenge     *hme.LoginChallenge
+	verifyCalls   int
+	validateErr   error
+	validateCalls int
+	closeCalls    int
 }
 
 func (c *fakePasswordLoginClient) StartLogin(username, password string) (*hme.LoginChallenge, error) {
@@ -515,6 +517,14 @@ func (c *fakePasswordLoginClient) VerifyLogin(challenge *hme.LoginChallenge, otp
 		return errors.New("unexpected login challenge")
 	}
 	return c.verifyErr
+}
+
+func (c *fakePasswordLoginClient) Validate() (bool, error) {
+	c.validateCalls++
+	if c.validateErr != nil {
+		return false, c.validateErr
+	}
+	return true, nil
 }
 
 func (c *fakePasswordLoginClient) SessionCookies() map[string]string {
@@ -551,6 +561,9 @@ func TestStartPasswordLoginPersistsDirectSuccess(t *testing.T) {
 	}
 	if client.closeCalls != 1 {
 		t.Errorf("client close calls = %d, want 1", client.closeCalls)
+	}
+	if client.validateCalls != 1 {
+		t.Errorf("client validate calls = %d, want 1", client.validateCalls)
 	}
 	acc, _ := mgr.accountSnapshot("acc_login")
 	if got := acc.Cookies["session"]; got != "direct-cookie" {
@@ -590,11 +603,40 @@ func TestPasswordLoginSessionVerifiesOnceAndPersists(t *testing.T) {
 	if client.otp != "123456" || client.verifyCalls != 1 || client.closeCalls != 1 {
 		t.Errorf("verify client state = otp %q, verify %d, close %d", client.otp, client.verifyCalls, client.closeCalls)
 	}
+	if client.validateCalls != 1 {
+		t.Errorf("verify client validate calls = %d, want 1", client.validateCalls)
+	}
 	if _, err := session.Verify("123456"); !errors.Is(err, ErrLoginSessionInvalid) {
 		t.Fatalf("second Verify() error = %v, want ErrLoginSessionInvalid", err)
 	}
 	if client.verifyCalls != 1 {
 		t.Errorf("consumed session called upstream %d times, want 1", client.verifyCalls)
+	}
+}
+
+func TestStartPasswordLoginDoesNotPersistUnvalidatedSession(t *testing.T) {
+	mgr := newPendingLoginManager(t)
+	client := &fakePasswordLoginClient{
+		cookies:     map[string]string{"session": "unvalidated-cookie"},
+		validateErr: errors.New("validation failed"),
+	}
+	mgr.newPasswordLoginClient = func(map[string]string, string, string, bool) (passwordLoginClient, error) {
+		return client, nil
+	}
+
+	_, session, err := mgr.StartPasswordLogin("acc_login", "apple-password")
+	if err == nil {
+		t.Fatal("StartPasswordLogin() error = nil, want validation failure")
+	}
+	if session != nil {
+		t.Fatal("StartPasswordLogin() session != nil")
+	}
+	if client.validateCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client state = validate %d, close %d", client.validateCalls, client.closeCalls)
+	}
+	acc, _ := mgr.accountSnapshot("acc_login")
+	if acc.Status != "pending" || len(acc.Cookies) != 0 || acc.LastValidated != "" {
+		t.Errorf("unvalidated login changed account: %#v", acc)
 	}
 }
 

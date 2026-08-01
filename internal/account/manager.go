@@ -63,6 +63,7 @@ const MaxCookieCount = 128
 type passwordLoginClient interface {
 	StartLogin(username, password string) (*hme.LoginChallenge, error)
 	VerifyLogin(challenge *hme.LoginChallenge, otp string) error
+	Validate() (bool, error)
 	SessionCookies() map[string]string
 	Close()
 }
@@ -545,8 +546,8 @@ func (m *Manager) StartPasswordLogin(id, password string) (AccountDTO, *Password
 	}
 
 	defer client.Close()
-	dto, err := m.persistPasswordLogin(id, client.SessionCookies())
-	return dto, nil, err
+	dto, err := m.persistPasswordLogin(id, client)
+	return dto, nil, safeAccountOperationError(err, append(secrets, password)...)
 }
 
 // Verify 提交 OTP 并原子保存登录生成的 Cookie。
@@ -578,7 +579,8 @@ func (s *PasswordLoginSession) Verify(otp string) (AccountDTO, error) {
 		secrets := append(accountSensitiveValues(acc), otp)
 		return AccountDTO{}, safeAccountOperationError(err, secrets...)
 	}
-	return manager.persistPasswordLogin(accountID, client.SessionCookies())
+	dto, err := manager.persistPasswordLogin(accountID, client)
+	return dto, safeAccountOperationError(err, append(accountSensitiveValues(acc), otp)...)
 }
 
 // Close 放弃登录会话并释放连接。重复调用是安全的。
@@ -598,7 +600,15 @@ func (s *PasswordLoginSession) Close() {
 	}
 }
 
-func (m *Manager) persistPasswordLogin(id string, cookies map[string]string) (AccountDTO, error) {
+func (m *Manager) persistPasswordLogin(id string, client passwordLoginClient) (AccountDTO, error) {
+	valid, err := client.Validate()
+	if err != nil {
+		return AccountDTO{}, fmt.Errorf("登录会话校验失败: %w", err)
+	}
+	if !valid {
+		return AccountDTO{}, errors.New("登录会话校验失败")
+	}
+	cookies := client.SessionCookies()
 	if err := validateCookieCount(cookies); err != nil {
 		return AccountDTO{}, err
 	}
