@@ -79,10 +79,16 @@ jobs:
       - name: Build the embedded Linux release binary
         run: VERSION=ci bash build.sh
       - name: Assert release binary metadata
+        shell: bash
         run: |
-          file build/icloud-hme | grep --quiet 'ELF 64-bit.*x86-64'
-          go version -m build/icloud-hme | grep --quiet 'build.*GOOS=linux'
-          go version -m build/icloud-hme | grep --quiet 'build.*GOARCH=amd64'
+          binary_type="$(file build/icloud-hme)"
+          printf '%s\n' "$binary_type"
+          grep --quiet 'ELF 64-bit.*x86-64' <<<"$binary_type"
+
+          build_info="$(go version -m build/icloud-hme)"
+          printf '%s\n' "$build_info"
+          grep --quiet '^[[:space:]]*build[[:space:]]+GOOS=linux$' <<<"$build_info"
+          grep --quiet '^[[:space:]]*build[[:space:]]+GOARCH=amd64$' <<<"$build_info"
       - name: Plant stale embedded asset sentinel
         run: |
           printf 'stale embedded asset sentinel\n' > internal/webui/dist/assets/ci-stale-sentinel.js
