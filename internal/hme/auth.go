@@ -493,11 +493,10 @@ func (c *Client) authenticateWeb(state *authState) error {
 	json.NewDecoder(resp.Body).Decode(&result)
 	state.dsid = result.DsInfo.Dsid
 
-	// 复制 idmsa.apple.com 的 Cookie 到 icloud.com
-	u1, _ := url.Parse("https://idmsa.apple.com")
-	u2, _ := url.Parse("https://icloud.com")
-	cookies := c.httpc.GetCookies(u1)
-	c.httpc.SetCookies(u2, cookies)
+	// 复制 idmsa.apple.com 的 Cookie 到当前 Web Origin
+	idmsaURL, _ := url.Parse("https://idmsa.apple.com")
+	webURL, _ := url.Parse(c.Origin())
+	c.httpc.SetCookies(webURL, c.httpc.GetCookies(idmsaURL))
 
 	return nil
 }

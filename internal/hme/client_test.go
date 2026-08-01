@@ -24,6 +24,70 @@ func TestNewClientCopiesCookies(t *testing.T) {
 	}
 }
 
+func TestParseAliasListReturnsEmptySliceForNoAliases(t *testing.T) {
+	aliases := parseAliasList(`{"result":{"hmeEmails":[]}}`)
+	if aliases == nil {
+		t.Fatal("parseAliasList() returned nil, want empty slice")
+	}
+	if len(aliases) != 0 {
+		t.Fatalf("parseAliasList() length = %d, want 0", len(aliases))
+	}
+}
+
+func TestAliasActionsRejectUnconfirmedResponses(t *testing.T) {
+	tests := []struct {
+		name   string
+		action func(*Client, string) (bool, error)
+		path   string
+	}{
+		{name: "deactivate", action: (*Client).DeactivateHME, path: "/v1/hme/deactivate"},
+		{name: "reactivate", action: (*Client).ReactivateHME, path: "/v1/hme/reactivate"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpClient := &scriptedAuthClient{
+				responses: []scriptedAuthResponse{{status: 200, body: `{"success":false}`}},
+			}
+			client := &Client{
+				Cookies:    map[string]string{},
+				Host:       "icloud.com",
+				httpc:      httpClient,
+				serviceURL: "https://service.example.test",
+			}
+
+			success, err := tt.action(client, "temporary-alias-id")
+			if err == nil {
+				t.Fatal("alias action error = nil, want confirmation failure")
+			}
+			if success {
+				t.Fatal("alias action success = true, want false")
+			}
+			if len(httpClient.requests) != 1 {
+				t.Fatalf("request count = %d, want 1", len(httpClient.requests))
+			}
+			if got := httpClient.requests[0].url; !strings.Contains(got, tt.path+"?") {
+				t.Errorf("request URL = %q, want path %q", got, tt.path)
+			}
+		})
+	}
+}
+
+func TestAliasActionConfirmationIncludesOnlySafeErrorCodes(t *testing.T) {
+	_, err := aliasActionConfirmation(`{"success":false,"error":{"errorCode":"INVALID_ALIAS"}}`, "停用")
+	if err == nil || !strings.Contains(err.Error(), "INVALID_ALIAS") {
+		t.Fatalf("safe error code was not included: %v", err)
+	}
+
+	_, err = aliasActionConfirmation(`{"success":false,"error":{"errorCode":"alias@example.com"}}`, "停用")
+	if err == nil {
+		t.Fatal("unsafe error code response returned nil error")
+	}
+	if strings.Contains(err.Error(), "alias@example.com") {
+		t.Errorf("unsafe error code leaked into error: %v", err)
+	}
+}
+
 func TestVerboseLogsExcludeRequestCredentials(t *testing.T) {
 	const (
 		applePassword  = "fe206-apple-password"

@@ -599,7 +599,7 @@ func (c *Client) DeactivateHME(anonymousID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return gjson.Get(body, "success").Bool(), nil
+	return aliasActionConfirmation(body, "停用")
 }
 
 // ReactivateHME 激活已停用的别名。
@@ -613,7 +613,34 @@ func (c *Client) ReactivateHME(anonymousID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return gjson.Get(body, "success").Bool(), nil
+	return aliasActionConfirmation(body, "恢复")
+}
+
+func aliasActionConfirmation(body, action string) (bool, error) {
+	if gjson.Get(body, "success").Bool() {
+		return true, nil
+	}
+	code := safeAliasActionErrorCode(firstNonEmpty(
+		gjson.Get(body, "error.errorCode").String(),
+		gjson.Get(body, "error.code").String(),
+	))
+	if code != "" {
+		return false, fmt.Errorf("iCloud 未确认%s操作 (%s)", action, code)
+	}
+	return false, fmt.Errorf("iCloud 未确认%s操作", action)
+}
+
+func safeAliasActionErrorCode(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 80 {
+		return ""
+	}
+	for _, r := range value {
+		if (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return ""
+		}
+	}
+	return value
 }
 
 // Delete 删除别名。若直接删除失败会先停用再删。
@@ -660,7 +687,7 @@ func parseAliasList(body string) []Alias {
 		return []Alias{}
 	}
 
-	var aliases []Alias
+	aliases := make([]Alias, 0)
 	arr.ForEach(func(_, item gjson.Result) bool {
 		if !item.IsObject() {
 			return true

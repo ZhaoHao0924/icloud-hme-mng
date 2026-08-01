@@ -80,6 +80,42 @@ func (c *scriptedAuthClient) CloseIdleConnections() {
 	c.closed = true
 }
 
+type hostScopedAuthClient struct {
+	scriptedAuthClient
+	cookiesByHost map[string][]*http.Cookie
+}
+
+func (c *hostScopedAuthClient) GetCookies(u *url.URL) []*http.Cookie {
+	return append([]*http.Cookie(nil), c.cookiesByHost[u.Host]...)
+}
+
+func (c *hostScopedAuthClient) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	c.cookiesByHost[u.Host] = append([]*http.Cookie(nil), cookies...)
+}
+
+func TestAuthenticateWebCopiesIDMSACookiesToWebOrigin(t *testing.T) {
+	for _, host := range []string{"icloud.com", "icloud.com.cn"} {
+		t.Run(host, func(t *testing.T) {
+			httpClient := &hostScopedAuthClient{
+				scriptedAuthClient: scriptedAuthClient{
+					responses: []scriptedAuthResponse{{status: 200, body: `{"dsInfo":{"dsid":"12345"}}`}},
+				},
+				cookiesByHost: map[string][]*http.Cookie{
+					"idmsa.apple.com": []*http.Cookie{{Name: "session", Value: "cookie-value"}},
+				},
+			}
+			client := &Client{Host: host, httpc: httpClient}
+
+			if err := client.authenticateWeb(&authState{authToken: "auth-token", trustToken: "trust-token"}); err != nil {
+				t.Fatalf("authenticateWeb() error = %v", err)
+			}
+			if got := client.extractSessionCookies()["session"]; got != "cookie-value" {
+				t.Errorf("web session cookie = %q, want cookie-value", got)
+			}
+		})
+	}
+}
+
 func TestStagedLoginUsesServerChallengeAndLatestTwoFactorHeaders(t *testing.T) {
 	httpClient := &scriptedAuthClient{
 		responses: []scriptedAuthResponse{
