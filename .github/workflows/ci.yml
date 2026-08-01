@@ -78,7 +78,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Build the embedded Linux release binary
         run: VERSION=ci bash build.sh
-      - name: Assert release binary metadata
+      - name: Assert release binary ELF metadata
         shell: bash
         run: |
           if output="$(go run ./scripts/assert_release_binary.go build/icloud-hme 2>&1)"; then
@@ -86,7 +86,7 @@ jobs:
           else
             printf '%s\n' "$output"
             error_message="${output//$'\n'/ }"
-            echo "::error title=Release binary metadata verification failed::$error_message"
+            echo "::error title=Release binary ELF verification failed::$error_message"
             exit 1
           fi
       - name: Plant stale embedded asset sentinel
