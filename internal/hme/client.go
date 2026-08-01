@@ -33,6 +33,9 @@ const (
 	RequestTimeout = 15 * time.Second
 	// MaxRetries 最大重试次数。
 	MaxRetries = 3
+	// sessionTrustChallengeStatus is returned by iCloud when the existing
+	// device trust session can no longer be used.
+	sessionTrustChallengeStatus = 421
 )
 
 var retryDelays = []time.Duration{
@@ -223,6 +226,22 @@ func requestLogURL(rawURL string) string {
 	return parsed.String()
 }
 
+func isSessionTrustChallenge(status int, body []byte) bool {
+	if status != sessionTrustChallengeStatus {
+		return false
+	}
+	return gjson.GetBytes(body, "trustTokens").IsArray()
+}
+
+func upstreamRequestError(status int, body []byte) error {
+	if isSessionTrustChallenge(status, body) {
+		return fmt.Errorf("iCloud session trust is no longer valid (HTTP %d)", status)
+	}
+	// Upstream bodies can include session and trust tokens. Do not surface them
+	// through the API response or verbose logs.
+	return fmt.Errorf("HTTP %d", status)
+}
+
 // buildURL 给 URL 追加 clientBuildNumber / clientMasteringNumber / clientId / dsid 查询参数,
 // 这是 iCloud Web API 的强制要求。
 func (c *Client) buildURL(rawURL string) string {
@@ -346,11 +365,10 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			snippet := string(text)
-			if len(snippet) > 200 {
-				snippet = snippet[:200]
+			lastErr = upstreamRequestError(resp.StatusCode, text)
+			if isSessionTrustChallenge(resp.StatusCode, text) {
+				return "", lastErr
 			}
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
 			// 401/403 说明 Cookie 失效,不重试直接返回。
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				return "", lastErr

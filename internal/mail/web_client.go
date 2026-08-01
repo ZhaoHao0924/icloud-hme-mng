@@ -25,6 +25,8 @@ import (
 // WebClientBuildNumber 是与浏览器一致的 mccgateway 邮件接口构建号。
 const WebClientBuildNumber = "2624Build13"
 
+const sessionTrustChallengeStatus = 421
+
 // ErrWebRecipientUnavailable 表示 Web 邮件响应没有足够信息进行可靠的别名筛选。
 var ErrWebRecipientUnavailable = errors.New("Web 邮件响应缺少可验证的收件人")
 
@@ -150,6 +152,28 @@ func (c *WebClient) withParams(rawURL string) (string, error) {
 	return parsed.String(), nil
 }
 
+func isSessionTrustChallenge(status int, body []byte) bool {
+	if status != sessionTrustChallengeStatus {
+		return false
+	}
+	var payload struct {
+		TrustTokens json.RawMessage `json:"trustTokens"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	tokens := bytes.TrimSpace(payload.TrustTokens)
+	return len(tokens) > 0 && !bytes.Equal(tokens, []byte("null"))
+}
+
+func webUpstreamError(operation string, status int, body []byte) error {
+	if isSessionTrustChallenge(status, body) {
+		return fmt.Errorf("iCloud session trust is no longer valid (HTTP %d)", status)
+	}
+	// Apple can include session and trust tokens in failure payloads.
+	return fmt.Errorf("%s: HTTP %d", operation, status)
+}
+
 // resolveMccGateway 从 validate 响应中获取 mccgateway URL。
 func (c *WebClient) resolveMccGateway() error {
 	if c.mccGatewayURL != "" {
@@ -184,7 +208,7 @@ func (c *WebClient) resolveMccGateway() error {
 		return fmt.Errorf("读取 validate 响应失败: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("validate 失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 200))
+		return webUpstreamError("validate failed", resp.StatusCode, body)
 	}
 
 	var parsed struct {
@@ -323,7 +347,7 @@ func (c *WebClient) search(payload []byte) ([]webSearchResult, error) {
 		return nil, fmt.Errorf("读取邮件响应失败: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("获取邮件失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 300))
+		return nil, webUpstreamError("read inbox failed", resp.StatusCode, body)
 	}
 
 	var result threadSearchResp

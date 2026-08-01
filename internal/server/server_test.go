@@ -451,6 +451,12 @@ func TestInboxQueryBounds(t *testing.T) {
 	}
 }
 
+func TestIsSessionErrorRecognizesTrustChallenge(t *testing.T) {
+	if !isSessionError("iCloud session trust is no longer valid (HTTP 421)") {
+		t.Fatal("session trust challenge was not classified as a session error")
+	}
+}
+
 func TestAliasLabelCharacterLimit(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -119,6 +119,31 @@ func TestWebClientRejectsUntrustedGatewayBeforeCookieAttachment(t *testing.T) {
 	}
 }
 
+func TestWebClientClassifiesTrustChallengeWithoutLeakingTokens(t *testing.T) {
+	const trustToken = "trust-token-must-not-leak"
+	fake := &fakeWebHTTPClient{responses: []*http.Response{
+		webJSONResponse(sessionTrustChallengeStatus, map[string]any{
+			"success":     false,
+			"trustTokens": []string{trustToken},
+		}),
+	}}
+	client := newWebClient(map[string]string{"session": "secret"}, "12345", "icloud.com", fake)
+
+	_, err := client.ListInbox(10)
+	if err == nil {
+		t.Fatal("ListInbox() error = nil, want session trust error")
+	}
+	if !strings.Contains(err.Error(), "session trust") {
+		t.Fatalf("ListInbox() error = %v, want session trust error", err)
+	}
+	if strings.Contains(err.Error(), trustToken) {
+		t.Errorf("ListInbox() leaked trust token: %v", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(fake.requests))
+	}
+}
+
 func TestWebClientMapsStableMessageFieldsNewestFirst(t *testing.T) {
 	newTime := time.Date(2026, time.July, 31, 12, 30, 0, 0, time.UTC)
 	oldTime := newTime.Add(-time.Hour)

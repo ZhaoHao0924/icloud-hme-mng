@@ -447,7 +447,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	if alias != "" {
 		messages, err := wmc.FindByAlias(alias, limit)
 		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+			failInboxRead(c, err)
 			return
 		}
 		ok(c, gin.H{
@@ -460,7 +460,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	} else {
 		messages, err := wmc.ListInbox(limit)
 		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+			failInboxRead(c, err)
 			return
 		}
 		ok(c, gin.H{
@@ -470,6 +470,15 @@ func (s *Server) listInbox(c *gin.Context) {
 			"method":     "web_api",
 		})
 	}
+}
+
+func failInboxRead(c *gin.Context, err error) {
+	msg := err.Error()
+	if isSessionError(msg) {
+		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
+		return
+	}
+	fail(c, http.StatusBadGateway, "读取邮件失败: "+msg)
 }
 
 // ====================================================================

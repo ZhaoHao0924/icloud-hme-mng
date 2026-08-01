@@ -178,6 +178,49 @@ func TestVerboseLogsExcludeRequestCredentials(t *testing.T) {
 	}
 }
 
+func TestRequestClassifiesTrustChallengeWithoutLeakingTokens(t *testing.T) {
+	const trustToken = "trust-token-must-not-leak"
+	httpClient := &scriptedAuthClient{responses: []scriptedAuthResponse{{
+		status: sessionTrustChallengeStatus,
+		body:   `{"success":false,"trustTokens":["` + trustToken + `"]}`,
+	}}}
+	client := &Client{Host: "icloud.com", httpc: httpClient}
+
+	_, err := client.request("POST", "https://setup.icloud.com/setup/ws/1/validate", nil, 0, MaxRetries)
+	if err == nil {
+		t.Fatal("request() error = nil, want session trust error")
+	}
+	if !strings.Contains(err.Error(), "session trust") {
+		t.Fatalf("request() error = %v, want session trust error", err)
+	}
+	if strings.Contains(err.Error(), trustToken) {
+		t.Errorf("request() leaked trust token: %v", err)
+	}
+	if len(httpClient.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(httpClient.requests))
+	}
+}
+
+func TestRequestDoesNotExposeUpstreamFailureBody(t *testing.T) {
+	const upstreamSecret = "upstream-secret-must-not-leak"
+	httpClient := &scriptedAuthClient{responses: []scriptedAuthResponse{{
+		status: 502,
+		body:   `{"detail":"` + upstreamSecret + `"}`,
+	}}}
+	client := &Client{Host: "icloud.com", httpc: httpClient}
+
+	_, err := client.request("GET", "https://service.example.test/resource", nil, 0, 1)
+	if err == nil {
+		t.Fatal("request() error = nil, want HTTP error")
+	}
+	if got, want := err.Error(), "HTTP 502"; got != want {
+		t.Errorf("request() error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), upstreamSecret) {
+		t.Errorf("request() leaked upstream response: %v", err)
+	}
+}
+
 func captureStdout(t *testing.T, run func()) string {
 	t.Helper()
 	reader, writer, err := os.Pipe()
