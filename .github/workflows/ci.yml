@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Go and frontend verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Go static analysis and race tests
+        run: |
+          go vet ./...
+          go test -race ./...
+      - name: Install frontend dependencies
+        run: npm ci --prefix web
+      - name: Frontend static checks and unit tests
+        run: |
+          npm --prefix web run format:check
+          npm --prefix web run lint
+          npm --prefix web run typecheck
+          npm --prefix web test
+          npm --prefix web run build
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Browser regression tests
+        working-directory: web
+        run: |
+          npm run test:e2e
+          npm run test:e2e:mock
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            web/test-results
+            web/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release-smoke:
+    name: Release binary and Docker smoke test
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the embedded Linux release binary
+        run: VERSION=ci bash build.sh
+      - name: Assert release binary metadata
+        run: |
+          file build/icloud-hme | grep --quiet 'ELF 64-bit.*x86-64'
+          go version -m build/icloud-hme | grep --quiet 'build.*GOOS=linux'
+          go version -m build/icloud-hme | grep --quiet 'build.*GOARCH=amd64'
+      - name: Plant stale embedded asset sentinel
+        run: |
+          printf 'stale embedded asset sentinel\n' > internal/webui/dist/assets/ci-stale-sentinel.js
+      - name: Build the Docker image
+        run: docker build --build-arg VERSION=ci --tag icloud-hme:ci .
+      - name: Smoke test the Docker image with a mounted data directory
+        run: bash scripts/ci-docker-smoke.sh icloud-hme:ci
+      - name: Upload release binary for diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icloud-hme-linux-amd64
+          path: build/icloud-hme
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, release-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build frontend assets for release binaries
+        run: |
+          npm ci --prefix web
+          npm --prefix web run build
+          rm -rf internal/webui/dist/assets internal/webui/dist/index.html
+          cp -R web/dist/. internal/webui/dist/
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          build_binary() {
+            local goos="$1"
+            local goarch="$2"
+            local suffix="$3"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -buildvcs=false \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${version}" \
+              -o "dist/icloud-hme_${goos}_${goarch}${suffix}" \
+              .
+          }
+          build_binary linux amd64 ""
+          build_binary linux arm64 ""
+          build_binary darwin amd64 ""
+          build_binary darwin arm64 ""
+          build_binary windows amd64 ".exe"
+      - name: Build and push the Docker image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="${GITHUB_REF_NAME}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg VERSION="$version" --tag "$image:$version" .
+          docker push "$image:$version"
+          if [[ "$version" != *-* ]]; then
+            docker tag "$image:$version" "$image:latest"
+            docker push "$image:latest"
+          fi
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if gh release view "$version" >/dev/null 2>&1; then
+            gh release upload "$version" dist/* --clobber
+          else
+            gh release create "$version" dist/* --title "$version" --generate-notes
+          fi

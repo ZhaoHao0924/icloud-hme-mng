@@ -1,0 +1,18 @@
+.git
+.gitignore
+.claude
+.agents
+.codex
+data
+logs
+accounts.json
+build
+*.exe
+web/node_modules
+web/dist
+web/.vite
+web/coverage
+web/playwright-report
+web/test-results
+# The frontend stage rebuilds these; do not copy host-generated embedded assets.
+internal/webui/dist/*
