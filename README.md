@@ -19,7 +19,7 @@
 
 #### 方式一：下载二进制发布版（推荐）
 
-从 [GitHub Releases](https://github.com/xiaozhou26/icloud-hme/releases) 下载对应平台的二进制文件：
+从 [GitHub Releases](https://github.com/ZhaoHao0924/icloud-hme-mng/releases) 下载对应平台的二进制文件：
 
 | 平台                | 文件                           |
 | ------------------- | ------------------------------ |
@@ -39,15 +39,16 @@ chmod +x icloud-hme_linux_amd64
 
 ```bash
 # 拉取镜像
-docker pull ghcr.io/xiaozhou26/icloud-hme:latest
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
 
 # 容器需要监听非回环地址，因此必须同时设置 API Token
 docker run -d \
   --name icloud-hme \
-  -p 8081:8081 \
+  --restart unless-stopped \
+  -p 127.0.0.1:8081:8081 \
   -e ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars \
   -v /path/to/data:/app/data \
-  ghcr.io/xiaozhou26/icloud-hme:latest \
+  ghcr.io/zhaohao0924/icloud-hme-mng:latest \
   -addr 0.0.0.0:8081
 ```
 
@@ -58,16 +59,18 @@ docker run -d \
 #### 方式三：源码编译
 
 ```bash
-# 前置要求: Go 1.26+
-git clone https://github.com/xiaozhou26/icloud-hme.git
-cd icloud-hme
+# 前置要求: Go 1.26+、Node.js 22.12.0+、npm
+git clone https://github.com/ZhaoHao0924/icloud-hme-mng.git
+cd icloud-hme-mng
 
-# 编译并注入健康检查返回的版本
-go build -ldflags="-X main.version=v0.2.0" -o icloud-hme.exe .
+# 编译并注入健康检查返回的版本（当前操作系统）
+go build -ldflags="-X main.version=v0.2.0" -o icloud-hme .
 
 # 调试模式（启用 Gin 请求日志）
-./icloud-hme.exe -debug
+./icloud-hme -debug
 ```
+
+`go build` 只编译当前操作系统的 Go 服务；如果没有先构建并嵌入 `web/dist`，Web UI 可能显示最小占位页。生产发布请使用 `build.sh`、`build.ps1` 或 Docker 构建，它们会先构建前端并嵌入完整 Web UI。
 
 ### 2. 配置账号
 
@@ -145,6 +148,351 @@ Authorization: Bearer <ICLOUD_HME_API_TOKEN>
 IMAP 收件箱在服务器搜索阶段应用 `days` 并按邮件时间倒序返回。摘要使用 `BODY.PEEK`，每封邮件最多拉取前 64 KiB 原始内容，返回的 `preview` 最多 4 KiB UTF-8 数据且不会把邮件标记为已读。
 
 Web API 收件箱使用 validate 返回的动态 `mccgateway` 并向该网关附加 Cookie；消息按时间倒序，日期为 UTC RFC3339，`preview` 最多 4 KiB。带 `alias` 时仅精确匹配响应中明确的收件人地址；收件人不可验证时返回错误，不使用主题或发件人猜测。
+
+## 部署指南
+
+本节给出 Linux、macOS、Windows、Docker 和 Docker Compose 的生产部署方式。运行时只需要发布二进制或容器镜像；只有从源码构建时才需要 Go、Node.js 和 npm。无论选择哪种方式，都必须把 `data` 指向持久化目录。该目录保存账号 Cookie、App Password、平台管理员认证、邮件/Webhook 通知配置、自动化进度、创建历史和操作日志，不能使用临时目录，也不要把它提交到 Git 或暴露在静态文件目录下。
+
+### 0. 通用准备
+
+1. 从 [GitHub Releases](https://github.com/ZhaoHao0924/icloud-hme-mng/releases) 下载与你的 CPU 架构匹配的文件，或使用 [GHCR 镜像](https://github.com/ZhaoHao0924/icloud-hme-mng/pkgs/container/icloud-hme-mng)。当前发布文件为：Linux `amd64`/`arm64`、macOS Intel `amd64`/Apple Silicon `arm64`、Windows `amd64`。
+2. 规划一个不会被清理的绝对数据路径。若之前已经配置过账号，启动时必须继续使用原来的数据目录，例如 `-data /var/lib/icloud-hme` 或 `-data C:\ProgramData\icloud-hme\data`；不要因为换了启动方式就重新使用空的 `./data`。
+3. 服务默认监听 `127.0.0.1:8081`。原生二进制只有在监听非回环地址时必须设置至少 32 个字符的 `ICLOUD_HME_API_TOKEN`；Docker 容器内部监听 `0.0.0.0:8081`，因此 Docker 和 Compose 始终要配置该 Token。生产环境优先使用回环监听加 HTTPS 反向代理。
+4. 首次启动打开 Web UI，创建管理员账号并登录。项目没有默认管理员密码；平台登录会话有效期为 12 小时，服务重启、会话过期或退出后需要重新登录。远程首次创建管理员账号时，还要在登录页输入 API Token。
+
+生成 Token 的示例：
+
+```
+# Linux/macOS
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+```
+
+### 1. Linux 原生二进制
+
+适用于 Debian、Ubuntu、Rocky Linux、Alpine（使用对应的 libc/系统环境验证）等 Linux 主机。发布二进制是静态构建的，通常不需要安装 Go 或 Node.js。
+
+#### 直接运行
+
+```
+# 以 amd64 为例；ARM64 主机请下载 icloud-hme_linux_arm64
+install -d -m 700 /opt/icloud-hme /var/lib/icloud-hme
+install -m 0755 ./icloud-hme_linux_amd64 /opt/icloud-hme/icloud-hme
+
+# 如果已有账号数据，把原数据目录填到 -data，不要覆盖或重新初始化它
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+/opt/icloud-hme/icloud-hme -addr 127.0.0.1:8081 -data /var/lib/icloud-hme
+```
+
+访问 `http://127.0.0.1:8081` 完成首次管理员设置。需要从其他机器访问时，建议保留回环监听并配置下方的反向代理；如果确实要直接监听网卡，请改为 `-addr 0.0.0.0:8081`，同时保留 Token 并限制防火墙来源。
+
+#### 使用 systemd 托管（推荐）
+
+先创建专用服务用户和权限受限的数据目录。已有数据目录请先停掉旧服务，再把它迁移或设置为该用户可读写的目录；不要用空目录替代原目录。
+
+```
+sudo useradd --system --home /var/lib/icloud-hme --shell /usr/sbin/nologin icloud-hme
+sudo install -d -o icloud-hme -g icloud-hme -m 700 /var/lib/icloud-hme
+sudo install -d -o root -g root -m 755 /opt/icloud-hme
+sudo install -m 0755 ./icloud-hme_linux_amd64 /opt/icloud-hme/icloud-hme
+sudo install -m 0600 /dev/null /etc/icloud-hme.env
+sudoedit /etc/icloud-hme.env
+```
+
+```
+ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars
+TZ=Asia/Shanghai
+```
+
+创建 `/etc/systemd/system/icloud-hme.service`：
+
+```
+[Unit]
+Description=iCloud Hide My Email management service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=icloud-hme
+Group=icloud-hme
+WorkingDirectory=/opt/icloud-hme
+EnvironmentFile=/etc/icloud-hme.env
+ExecStart=/opt/icloud-hme/icloud-hme -addr 127.0.0.1:8081 -data /var/lib/icloud-hme
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/icloud-hme
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用、查看状态和日志：
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now icloud-hme
+sudo systemctl status icloud-hme --no-pager
+sudo journalctl -u icloud-hme -n 200 --no-pager
+sudo journalctl -u icloud-hme -f
+```
+
+升级时先在 Web UI 暂停自动化规则，停止服务并完成备份，再只替换 `/opt/icloud-hme/icloud-hme`，最后执行 `sudo systemctl start icloud-hme`。确认服务健康、账号列表和自动化状态后，再保留旧二进制作为短期回滚副本。
+
+### 2. macOS 原生二进制
+
+Intel Mac 使用 `icloud-hme_darwin_amd64`，Apple Silicon（M1/M2/M3/M4）使用 `icloud-hme_darwin_arm64`。运行环境不需要 Go 或 Node.js。
+
+#### 前台运行
+
+```
+mkdir -p "$HOME/Applications/icloud-hme" "$HOME/Library/Application Support/icloud-hme/data"
+cp ./icloud-hme_darwin_arm64 "$HOME/Applications/icloud-hme/icloud-hme"
+chmod 755 "$HOME/Applications/icloud-hme/icloud-hme"
+chmod 700 "$HOME/Library/Application Support/icloud-hme/data"
+
+# 从浏览器下载的文件可能带有 Gatekeeper 隔离属性，只移除该文件的属性
+xattr -d com.apple.quarantine "$HOME/Applications/icloud-hme/icloud-hme" 2>/dev/null || true
+
+"$HOME/Applications/icloud-hme/icloud-hme" -addr 127.0.0.1:8081 -data "$HOME/Library/Application Support/icloud-hme/data"
+```
+
+如果已有数据，请把 `-data` 改成原来的绝对路径。不要全局关闭 Gatekeeper；如果系统仍然阻止运行，应在“系统设置 > 隐私与安全性”中确认这一次打开操作。要允许脚本通过 Bearer Token 访问，可以在当前终端临时设置 `ICLOUD_HME_API_TOKEN`；监听回环地址时不强制要求它。
+
+#### 使用 launchd 常驻
+
+需要登录用户启动时，可创建 `~/Library/LaunchAgents/com.icloud-hme.plist`。将下面的 `/Users/your-user` 和二进制名称替换为实际值；LaunchAgent 中使用绝对路径，不能依赖 `$HOME` 展开：
+
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.icloud-hme</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/your-user/Applications/icloud-hme/icloud-hme</string>
+    <string>-addr</string>
+    <string>127.0.0.1:8081</string>
+    <string>-data</string>
+    <string>/Users/your-user/Library/Application Support/icloud-hme/data</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/your-user/Applications/icloud-hme</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/your-user/Library/Logs/icloud-hme.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/your-user/Library/Logs/icloud-hme.error.log</string>
+</dict>
+</plist>
+```
+
+```
+mkdir -p "$HOME/Library/Logs"
+chmod 600 "$HOME/Library/LaunchAgents/com.icloud-hme.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.icloud-hme.plist"
+launchctl kickstart -k "gui/$(id -u)/com.icloud-hme"
+launchctl print "gui/$(id -u)/com.icloud-hme"
+```
+
+如果在 plist 中添加 `ICLOUD_HME_API_TOKEN`，该文件就是敏感配置，应保持 `0600`，不要提交到仓库。升级时先执行 `launchctl bootout "gui/$(id -u)/com.icloud-hme"`，备份并替换二进制，再重新 `bootstrap`。
+
+### 3. Windows 原生二进制
+
+Windows 使用 `icloud-hme_windows_amd64.exe`。建议把程序放在 `C:\Program Files\icloud-hme`，把数据放在 `C:\ProgramData\icloud-hme\data`，这样升级程序时不会误动账号数据。
+
+#### PowerShell 前台运行
+
+首次安装到 `Program Files` 和 `ProgramData` 时请以管理员身份打开 PowerShell；如果不使用这两个目录，也可以选择当前用户有写权限的绝对路径。
+
+```
+$root = Join-Path $env:ProgramFiles "icloud-hme"
+$dataDir = Join-Path $env:ProgramData "icloud-hme\data"
+New-Item -ItemType Directory -Force -Path $root, $dataDir | Out-Null
+Copy-Item .\icloud-hme_windows_amd64.exe (Join-Path $root "icloud-hme.exe")
+Unblock-File (Join-Path $root "icloud-hme.exe")
+
+# 仅对当前 PowerShell 进程设置 Token；不要把明文 Token 写进提交到仓库的脚本
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$env:ICLOUD_HME_API_TOKEN = ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+
+& (Join-Path $root "icloud-hme.exe") -addr 127.0.0.1:8081 -data $dataDir
+```
+
+如果之前已有账号，请把 `$dataDir` 改成旧数据目录，并确认该目录包含原来的 `accounts.json`。当前终端关闭后，以上环境变量不会自动保留。监听非回环地址时使用 `-addr 0.0.0.0:8081`，但必须设置 Token，并在 Windows 防火墙中仅允许可信网段。
+
+例如只允许局域网 `192.168.1.0/24` 访问直连端口（管理员 PowerShell）：
+
+```
+New-NetFirewallRule -DisplayName "iCloud HME 8081 from LAN" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 -RemoteAddress 192.168.1.0/24
+```
+
+#### 使用任务计划程序常驻
+
+推荐任务计划程序以 `SYSTEM` 或专用服务账户运行，并让服务保持回环监听；远程访问交给 HTTPS 反向代理。以下命令需要管理员 PowerShell，任务创建前应把程序和数据目录的 ACL 授予实际运行账户：
+
+```
+$root = Join-Path $env:ProgramFiles "icloud-hme"
+$dataDir = Join-Path $env:ProgramData "icloud-hme\data"
+icacls (Join-Path $env:ProgramData "icloud-hme") /grant:r "SYSTEM:(OI)(CI)F" /T
+$action = New-ScheduledTaskAction `
+  -Execute (Join-Path $root "icloud-hme.exe") `
+  -Argument "-addr 127.0.0.1:8081 -data `"$dataDir`"" `
+  -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "icloud-hme" -Action $action -Trigger $trigger -Principal $principal -Force
+Start-ScheduledTask -TaskName "icloud-hme"
+Get-ScheduledTask -TaskName "icloud-hme"
+```
+
+该示例使用回环监听，因此不依赖 Token。若必须直接对外监听，使用受保护的服务账户环境变量或 WinSW/NSSM 等服务包装器注入 Token，不要把 Token 写入公开脚本。升级前执行 `Stop-ScheduledTask -TaskName "icloud-hme"`，完成备份后替换 exe，再执行 `Start-ScheduledTask`。
+
+### 4. Docker 镜像
+
+发布镜像为 `ghcr.io/zhaohao0924/icloud-hme-mng`，支持 `linux/amd64` 和 `linux/arm64`。生产环境建议使用具体版本标签（例如 `v0.2.0`），确认无误后再考虑 `latest`。容器内服务必须监听 `0.0.0.0:8081`，所以必须提供至少 32 个字符的 Token。
+
+#### Linux/macOS shell
+
+```
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
+mkdir -p ./data
+chmod 700 ./data
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name icloud-hme --restart unless-stopped --init -p 127.0.0.1:8081:8081 -e "ICLOUD_HME_API_TOKEN=$ICLOUD_HME_API_TOKEN" -e TZ=Asia/Shanghai -v "$(pwd)/data:/app/data" ghcr.io/zhaohao0924/icloud-hme-mng:latest -addr 0.0.0.0:8081 -data /app/data
+```
+
+上述端口映射只允许宿主机访问；反向代理也应连接 `127.0.0.1:8081`。查看状态和日志：
+
+```
+docker ps --filter name=icloud-hme
+docker logs --tail 200 icloud-hme
+curl -fsS -H "Authorization: Bearer $ICLOUD_HME_API_TOKEN" http://127.0.0.1:8081/api/health
+```
+
+#### Windows PowerShell
+
+```
+$dataDir = (New-Item -ItemType Directory -Force .\data).FullName
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$token = ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
+docker run -d --name icloud-hme --restart unless-stopped --init -p 127.0.0.1:8081:8081 --env "ICLOUD_HME_API_TOKEN=$token" --env "TZ=Asia/Shanghai" --mount "type=bind,source=$dataDir,target=/app/data" ghcr.io/zhaohao0924/icloud-hme-mng:latest -addr 0.0.0.0:8081 -data /app/data
+```
+
+Docker 容器删除或重建不会删除 bind mount 中的宿主机数据；但不要使用会清理卷或数据目录的命令，升级前仍应停容器并备份。
+
+### 5. Docker Compose
+
+仓库中的 `compose.yaml` 当前是“从源码 checkout 构建镜像”的方案，不是直接拉取 GHCR 镜像。它已经配置了数据 bind mount、健康检查、自动重启、`init` 和 `no-new-privileges`。
+
+Linux/macOS：
+
+```
+git clone https://github.com/ZhaoHao0924/icloud-hme-mng.git
+cd icloud-hme-mng
+cp .env.example .env
+mkdir -p /srv/icloud-hme/data
+chmod 700 /srv/icloud-hme/data
+vi .env
+```
+
+至少设置以下值，并把 `ICLOUD_HME_DATA_DIR` 改为实际持久化路径：
+
+```
+ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars
+ICLOUD_HME_BIND_ADDRESS=127.0.0.1
+ICLOUD_HME_PORT=8081
+ICLOUD_HME_DATA_DIR=/srv/icloud-hme/data
+ICLOUD_HME_IMAGE=icloud-hme:local
+ICLOUD_HME_VERSION=dev
+TZ=Asia/Shanghai
+```
+
+启动和日常操作：
+
+```
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 200 app
+docker compose restart app
+docker compose stop app
+docker compose start app
+docker compose down
+```
+
+Compose 会把容器内的 `0.0.0.0:8081` 映射到宿主机的 `ICLOUD_HME_BIND_ADDRESS`；默认是 `127.0.0.1:8081`。健康检查访问 `/api/auth/session`，不显示账号凭据。首次启动后打开 `http://127.0.0.1:8081`。Windows PowerShell 使用 `Copy-Item .env.example .env`，并建议在 `.env` 中使用 Docker 可识别的路径，例如 `D:/Services/icloud-hme/data`。`docker compose down` 只移除容器，不会移除 bind mount 数据目录。
+
+如果不需要本地源码构建，可使用上面的 `docker run` 直接部署 GHCR 版本；Compose 文件本身仍会执行本地 Dockerfile 构建，更新源码后用 `docker compose up -d --build` 重建。
+
+### 6. 反向代理与 HTTPS
+
+不要把 Go 服务的明文 HTTP 端口直接暴露到公网。原生部署将服务绑定在 `127.0.0.1:8081`；Compose 将 `ICLOUD_HME_BIND_ADDRESS` 保持为 `127.0.0.1`；再由 Caddy、Nginx 或现有网关负责 TLS、域名和外部访问控制。公开访问必须使用 HTTPS，尤其是管理员登录和通知配置页面。
+
+Caddy 示例（DNS 已指向此主机，Caddy 负责自动申请证书）：
+
+```
+hme.example.com {
+    reverse_proxy 127.0.0.1:8081
+}
+```
+
+Nginx 示例（证书路径按实际环境替换）：
+
+```
+server {
+    listen 443 ssl http2;
+    server_name hme.example.com;
+    ssl_certificate /etc/letsencrypt/live/hme.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hme.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+反向代理不替代平台管理员登录。代理后首次打开域名仍需创建管理员并登录；脚本或自动化使用 API 时继续发送 `Authorization: Bearer <ICLOUD_HME_API_TOKEN>`。若直接绑定非回环地址，必须同时配置 Token、主机防火墙和可信来源限制。
+
+### 7. 首次验证与已有账号数据
+
+1. 确认进程参数中的 `-data` 或 Compose 的 `ICLOUD_HME_DATA_DIR` 指向预期目录，并确认其中已有 `accounts.json`。这一步决定服务加载哪一批账号数据。
+2. 浏览器访问本机地址或反向代理域名，首次创建管理员账号，然后登录平台。
+3. 逐个检查账号、别名列表、收件箱和自动化规则。仅查看和“自动化预览”不会创建或删除别名。
+4. 用 Bearer Token 检查服务健康状态：
+
+```
+curl -fsS -H "Authorization: Bearer $ICLOUD_HME_API_TOKEN" http://127.0.0.1:8081/api/health
+```
+
+浏览器会话可通过 `GET /api/auth/session` 检查登录状态；该接口也用于 Compose 健康检查。健康检查不会返回 Cookie、App Password、账号详情或数据路径。
+
+### 8. 安全、备份与升级
+
+- Linux/macOS 数据目录建议目录权限 `0700`、敏感文件权限 `0600`；Windows 使用专用服务账户和 ACL；Docker bind mount 的宿主机目录也要限制访问。
+- `accounts.json` 可能包含 iCloud Cookie、App Password 和代理凭据；`platform-auth.json` 保存管理员密码哈希；邮件通知配置可能包含 163 邮箱授权码；Webhook 配置包含签名密钥。不要把这些文件、`.env`、launchd plist 或日志上传到公共位置。
+- 备份前先在 Web UI 暂停自动化规则，再停止服务或容器，确保 `accounts.json`、平台认证和日志处于同一时间点。详细的带校验清单、恢复前确认和回滚目录流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+- Linux/macOS 可在停止服务后使用受限备份目录执行 `tar`；Windows 可使用仓库中的 `scripts/backup-data.ps1` 和 `scripts/verify-data-backup.ps1`。恢复前必须先保留旧数据目录，验证恢复内容后再删除回滚副本。
+- 升级只替换二进制、容器镜像或源码构建产物，始终复用原数据目录。升级后检查健康状态、账号和自动化配置；出现问题时停止新版本并回滚二进制/镜像，不能用空目录启动来“修复”配置。
+- `DELETE /api/aliases/:id`、停用别名和删除账号会改变真实 iCloud 数据。不要用这些操作做部署验收，也不要执行 `docker compose down -v`、`rm -rf` 或清空数据目录来排查问题；先备份并使用只读检查或自动化预览。
+
+完整的 Compose 备份、恢复和离线烟测命令集中在 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ## API 接口
 
@@ -666,7 +1014,7 @@ npm run test:e2e
 git tag v0.2.0 && git push origin --tags
 ```
 
-Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/xiaozhou26/icloud-hme`）并创建 Release。
+Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/zhaohao0924/icloud-hme-mng`）并创建 Release。
 
 Pull Request 和 `main` 分支推送会执行 Go 竞态测试、前端回归、Bash 发布构建和 Docker 挂载数据目录烟测；只有这些检查通过后，`v*` tag 才会发布二进制和 GHCR 镜像。
 
@@ -703,7 +1051,7 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 
 #### Option 1: Binary (GitHub Releases)
 
-Download the latest binary from [GitHub Releases](https://github.com/xiaozhou26/icloud-hme/releases):
+Download the latest binary from [GitHub Releases](https://github.com/ZhaoHao0924/icloud-hme-mng/releases):
 
 | Platform            | File                           |
 | ------------------- | ------------------------------ |
@@ -722,22 +1070,23 @@ chmod +x icloud-hme_linux_amd64
 #### Option 2: Docker
 
 ```bash
-docker pull ghcr.io/xiaozhou26/icloud-hme:latest
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
 
 docker run -d \
   --name icloud-hme \
-  -p 8081:8081 \
+  --restart unless-stopped \
+  -p 127.0.0.1:8081:8081 \
   -e ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars \
   -v /path/to/data:/app/data \
-  ghcr.io/xiaozhou26/icloud-hme:latest \
-  -addr 0.0.0.0:8081
+  ghcr.io/zhaohao0924/icloud-hme-mng:latest \
+  -addr 0.0.0.0:8081 -data /app/data
 ```
 
 #### Option 3: Build from source
 
 ```bash
-git clone https://github.com/xiaozhou26/icloud-hme.git
-cd icloud-hme
+git clone https://github.com/ZhaoHao0924/icloud-hme-mng.git
+cd icloud-hme-mng
 VERSION=v0.2.0 ./build.sh
 ./build/icloud-hme -debug     # enable request logging
 
@@ -790,4 +1139,339 @@ The embedded Web UI requires a local administrator setup on first use and a plat
 
 `GET /api/health` returns the service name, build version, `ok`/`degraded` status, and configuration availability without exposing paths, accounts, credentials, or internal errors. It requires a valid platform session or Bearer token, like every business API route.
 
-163 Mail is the only outbound email integration. Configure a `@163.com` sender address, a QQ recipient address (`@qq.com`, `@vip.qq.com`, or `@foxmail.com`), and a 163 Mail authorization code in System Settings. The service uses fixed implicit-TLS SMTP at `smtp.163.com:465`; the authorization code is not the 163 login password. It is stored in `email-notification.json` with protected permissions and is never returned by the API, operation logs, or notification content. `GET`/`PUT /api/notifications/email` manage the redacted configuration, and `POST /api/notifications/email/test` sends a saved-configuration test message. Automation and iCloud-session events use a bounded asynchronous queue with up to three delivery attempts, so mail delivery cannot block alias work.
+### Deployment Guide
+
+This section covers native Linux, macOS, and Windows deployments, Docker, Docker Compose, reverse proxies, first-run authentication, and maintenance. A release binary or container image is enough at runtime; Go, Node.js, and npm are required only for source builds. Always use a persistent data directory because it contains iCloud Cookies, App Passwords, platform administrator authentication, notification settings, automation state, creation history, and operation logs.
+
+### Common prerequisites
+
+1. Download the artifact matching the host architecture from [GitHub Releases](https://github.com/ZhaoHao0924/icloud-hme-mng/releases), or use `ghcr.io/zhaohao0924/icloud-hme-mng`. Releases include Linux `amd64`/`arm64`, macOS Intel `amd64`/Apple Silicon `arm64`, and Windows `amd64`.
+2. Choose a persistent absolute data path. If accounts were configured previously, keep using the same directory with `-data` or `ICLOUD_HME_DATA_DIR`; starting with a new empty `./data` directory makes the existing accounts appear to be missing.
+3. Native binaries listen on `127.0.0.1:8081` by default. A native process must receive an `ICLOUD_HME_API_TOKEN` of at least 32 characters when it listens on a non-loopback address. Docker and Compose listen on `0.0.0.0:8081` inside the container, so they always need the token. Prefer loopback plus an HTTPS reverse proxy for external access.
+4. On first launch, open the Web UI, create the local administrator, and sign in. There is no default administrator password. The server-side platform session lasts 12 hours and is lost on restart, expiry, or logout. Remote initial setup also requires the API token in the setup page.
+
+Generate a token on Linux or macOS with:
+
+```
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+```
+
+Source builds require Go 1.26+ and Node.js 22.12.0+ with npm. `build.sh` and `build.ps1` produce a Linux amd64 binary; they do not produce the native Windows executable. For native Windows deployment, use the Windows release artifact or follow the frontend embedding steps used by the release workflow.
+
+### Linux native binary
+
+The release binary is statically built and normally needs no Go or Node.js installation.
+
+#### Run in the foreground
+
+```
+# Use icloud-hme_linux_arm64 on an ARM64 host.
+install -d -m 700 /opt/icloud-hme /var/lib/icloud-hme
+install -m 0755 ./icloud-hme_linux_amd64 /opt/icloud-hme/icloud-hme
+
+# Point -data at the existing data directory when accounts already exist.
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+/opt/icloud-hme/icloud-hme -addr 127.0.0.1:8081 -data /var/lib/icloud-hme
+```
+
+Open `http://127.0.0.1:8081` for the first administrator setup. For access from another machine, keep the process on loopback and use the reverse proxy example below. Directly binding `0.0.0.0:8081` requires the token and a firewall rule that limits trusted source addresses.
+
+#### Run with systemd
+
+Create a dedicated service account and grant it access only to the application and data directories. If the data directory already exists, stop the old process and adjust its ownership instead of creating an empty replacement.
+
+```
+sudo useradd --system --home /var/lib/icloud-hme --shell /usr/sbin/nologin icloud-hme
+sudo install -d -o icloud-hme -g icloud-hme -m 700 /var/lib/icloud-hme
+sudo install -d -o root -g root -m 755 /opt/icloud-hme
+sudo install -m 0755 ./icloud-hme_linux_amd64 /opt/icloud-hme/icloud-hme
+sudo install -m 0600 /dev/null /etc/icloud-hme.env
+sudoedit /etc/icloud-hme.env
+```
+
+```
+ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars
+TZ=Asia/Shanghai
+```
+
+Create `/etc/systemd/system/icloud-hme.service`:
+
+```
+[Unit]
+Description=iCloud Hide My Email management service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=icloud-hme
+Group=icloud-hme
+WorkingDirectory=/opt/icloud-hme
+EnvironmentFile=/etc/icloud-hme.env
+ExecStart=/opt/icloud-hme/icloud-hme -addr 127.0.0.1:8081 -data /var/lib/icloud-hme
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/icloud-hme
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and inspect it:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now icloud-hme
+sudo systemctl status icloud-hme --no-pager
+sudo journalctl -u icloud-hme -n 200 --no-pager
+sudo journalctl -u icloud-hme -f
+```
+
+For an upgrade, pause automation in the Web UI, stop the service, create and verify a backup, replace only `/opt/icloud-hme/icloud-hme`, and start the service again. Keep the old binary until the new version has passed health, account, and automation checks.
+
+### macOS native binary
+
+Use `icloud-hme_darwin_amd64` on Intel Macs and `icloud-hme_darwin_arm64` on Apple Silicon. No Go or Node.js installation is needed at runtime.
+
+#### Run in the foreground
+
+```
+mkdir -p "$HOME/Applications/icloud-hme" "$HOME/Library/Application Support/icloud-hme/data"
+cp ./icloud-hme_darwin_arm64 "$HOME/Applications/icloud-hme/icloud-hme"
+chmod 755 "$HOME/Applications/icloud-hme/icloud-hme"
+chmod 700 "$HOME/Library/Application Support/icloud-hme/data"
+
+# Remove only this downloaded file's quarantine attribute if Gatekeeper added one.
+xattr -d com.apple.quarantine "$HOME/Applications/icloud-hme/icloud-hme" 2>/dev/null || true
+
+"$HOME/Applications/icloud-hme/icloud-hme" -addr 127.0.0.1:8081 -data "$HOME/Library/Application Support/icloud-hme/data"
+```
+
+Change `-data` to the existing absolute data path when migrating an installation. Do not disable Gatekeeper globally; if macOS still blocks the first launch, approve this specific application in System Settings > Privacy & Security. A loopback listener does not require the API token, although you can set it temporarily for scripts.
+
+#### Run with launchd
+
+For a per-user service, create `~/Library/LaunchAgents/com.icloud-hme.plist`. Replace `/Users/your-user` with the real home directory. launchd requires absolute paths:
+
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.icloud-hme</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/your-user/Applications/icloud-hme/icloud-hme</string>
+    <string>-addr</string>
+    <string>127.0.0.1:8081</string>
+    <string>-data</string>
+    <string>/Users/your-user/Library/Application Support/icloud-hme/data</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/your-user/Applications/icloud-hme</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/your-user/Library/Logs/icloud-hme.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/your-user/Library/Logs/icloud-hme.error.log</string>
+</dict>
+</plist>
+```
+
+```
+mkdir -p "$HOME/Library/Logs"
+chmod 600 "$HOME/Library/LaunchAgents/com.icloud-hme.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.icloud-hme.plist"
+launchctl kickstart -k "gui/$(id -u)/com.icloud-hme"
+launchctl print "gui/$(id -u)/com.icloud-hme"
+```
+
+If a token is added to the plist, the plist becomes secret material and must remain mode `0600`. For an upgrade, run `launchctl bootout "gui/$(id -u)/com.icloud-hme"`, back up the data, replace the binary, and bootstrap the plist again.
+
+### Windows native binary
+
+Use `icloud-hme_windows_amd64.exe`. Keep the executable under `C:\Program Files\icloud-hme` and persistent data under `C:\ProgramData\icloud-hme\data`, so replacing the executable cannot accidentally replace account data.
+
+#### Run with PowerShell
+
+Run the initial installation from an elevated PowerShell when using `Program Files` and `ProgramData`; otherwise choose absolute paths writable by the current user.
+
+```
+$root = Join-Path $env:ProgramFiles "icloud-hme"
+$dataDir = Join-Path $env:ProgramData "icloud-hme\data"
+New-Item -ItemType Directory -Force -Path $root, $dataDir | Out-Null
+Copy-Item .\icloud-hme_windows_amd64.exe (Join-Path $root "icloud-hme.exe")
+Unblock-File (Join-Path $root "icloud-hme.exe")
+
+# This token exists only in the current PowerShell process.
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$env:ICLOUD_HME_API_TOKEN = ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+
+& (Join-Path $root "icloud-hme.exe") -addr 127.0.0.1:8081 -data $dataDir
+```
+
+When existing accounts are present, set `$dataDir` to the old directory and verify that it contains `accounts.json`. The environment variable above is not retained after the terminal closes. A non-loopback listener requires the token and a Windows Firewall rule limited to trusted networks.
+
+For example, this administrator PowerShell rule permits only the LAN `192.168.1.0/24` to reach a directly bound port:
+
+```
+New-NetFirewallRule -DisplayName "iCloud HME 8081 from LAN" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 -RemoteAddress 192.168.1.0/24
+```
+
+#### Run with Task Scheduler
+
+A scheduled task can run as `SYSTEM` or a dedicated service account while the application remains on loopback and a reverse proxy handles external access. Run this from an elevated PowerShell and grant the selected account access to the application and data directories:
+
+```
+$root = Join-Path $env:ProgramFiles "icloud-hme"
+$dataDir = Join-Path $env:ProgramData "icloud-hme\data"
+icacls (Join-Path $env:ProgramData "icloud-hme") /grant:r "SYSTEM:(OI)(CI)F" /T
+$action = New-ScheduledTaskAction `
+  -Execute (Join-Path $root "icloud-hme.exe") `
+  -Argument "-addr 127.0.0.1:8081 -data `"$dataDir`"" `
+  -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "icloud-hme" -Action $action -Trigger $trigger -Principal $principal -Force
+Start-ScheduledTask -TaskName "icloud-hme"
+Get-ScheduledTask -TaskName "icloud-hme"
+```
+
+This loopback example does not need a token. If direct non-loopback access is unavoidable, inject the token through a protected service-account environment or a service wrapper such as WinSW/NSSM; do not commit a plaintext token in a launcher script. Before upgrading, stop the task, back up the data, replace the exe, and start the task again.
+
+### Docker image
+
+The published image is `ghcr.io/zhaohao0924/icloud-hme-mng` and supports `linux/amd64` and `linux/arm64`. Pin a release tag such as `v0.2.0` in production and use `latest` only when that update policy is acceptable. The container listens on `0.0.0.0:8081`, so a token of at least 32 characters is required.
+
+#### Linux/macOS shell
+
+```
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
+mkdir -p ./data && chmod 700 ./data
+export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name icloud-hme --restart unless-stopped --init -p 127.0.0.1:8081:8081 -e "ICLOUD_HME_API_TOKEN=$ICLOUD_HME_API_TOKEN" -e TZ=Asia/Shanghai -v "$(pwd)/data:/app/data" ghcr.io/zhaohao0924/icloud-hme-mng:latest -addr 0.0.0.0:8081 -data /app/data
+docker ps --filter name=icloud-hme
+docker logs --tail 200 icloud-hme
+curl -fsS -H "Authorization: Bearer $ICLOUD_HME_API_TOKEN" http://127.0.0.1:8081/api/health
+```
+
+The host port is loopback-only; point the reverse proxy at `127.0.0.1:8081`. Removing or recreating the container does not remove a bind-mounted host directory, but stop the container and back up the directory before an upgrade.
+
+#### Windows PowerShell
+
+```
+$dataDir = (New-Item -ItemType Directory -Force .\data).FullName
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$token = ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+docker pull ghcr.io/zhaohao0924/icloud-hme-mng:latest
+docker run -d --name icloud-hme --restart unless-stopped --init -p 127.0.0.1:8081:8081 --env "ICLOUD_HME_API_TOKEN=$token" --env "TZ=Asia/Shanghai" --mount "type=bind,source=$dataDir,target=/app/data" ghcr.io/zhaohao0924/icloud-hme-mng:latest -addr 0.0.0.0:8081 -data /app/data
+```
+
+### Docker Compose
+
+The repository `compose.yaml` builds from the checked-out source tree. It is not a pull-only GHCR deployment. It configures a bind-mounted data directory, health check, restart policy, `init`, and `no-new-privileges`.
+
+On Linux/macOS:
+
+```
+git clone https://github.com/ZhaoHao0924/icloud-hme-mng.git
+cd icloud-hme-mng
+cp .env.example .env
+mkdir -p /srv/icloud-hme/data && chmod 700 /srv/icloud-hme/data
+vi .env
+```
+
+Set at least these values and replace the data path with the persistent directory used by this installation:
+
+```
+ICLOUD_HME_API_TOKEN=replace-with-a-random-token-at-least-32-chars
+ICLOUD_HME_BIND_ADDRESS=127.0.0.1
+ICLOUD_HME_PORT=8081
+ICLOUD_HME_DATA_DIR=/srv/icloud-hme/data
+ICLOUD_HME_IMAGE=icloud-hme:local
+ICLOUD_HME_VERSION=dev
+TZ=Asia/Shanghai
+```
+
+Start and operate the service:
+
+```
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 200 app
+docker compose restart app
+docker compose stop app
+docker compose start app
+docker compose down
+```
+
+Compose maps the container's `0.0.0.0:8081` to `ICLOUD_HME_BIND_ADDRESS`, which defaults to host loopback. Its health check calls `/api/auth/session` and does not expose account credentials. Open `http://127.0.0.1:8081` after the first start. In Windows PowerShell, copy `.env.example` with `Copy-Item` and use a Docker-compatible path such as `D:/Services/icloud-hme/data`. `docker compose down` removes the container but not the bind-mounted host data.
+
+If a local source checkout is not desired, use the `docker run` example above for the published GHCR image. This Compose file still builds the local Dockerfile whenever `docker compose up -d --build` is run.
+
+### Reverse proxy and HTTPS
+
+Do not expose the application's plain HTTP port directly to the public internet. Keep a native process on `127.0.0.1:8081`, or keep `ICLOUD_HME_BIND_ADDRESS=127.0.0.1` in Compose, and let Caddy, Nginx, or an existing gateway terminate TLS and enforce network policy. Public access must use HTTPS, especially for administrator login and notification settings.
+
+Caddy example:
+
+```
+hme.example.com {
+    reverse_proxy 127.0.0.1:8081
+}
+```
+
+Nginx example:
+
+```
+server {
+    listen 443 ssl http2;
+    server_name hme.example.com;
+    ssl_certificate /etc/letsencrypt/live/hme.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hme.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+A reverse proxy does not replace the platform administrator login. The first visit through the proxy still creates and signs in to the administrator. Scripts and automation should continue to send `Authorization: Bearer <ICLOUD_HME_API_TOKEN>`. Direct non-loopback binding requires the token, host firewall, and trusted-source restrictions.
+
+### First-run validation and existing data
+
+1. Confirm that `-data` or `ICLOUD_HME_DATA_DIR` points to the intended directory and, for an existing installation, that it contains the original `accounts.json`.
+2. Open the local URL or proxy domain, create the administrator on first use, and sign in.
+3. Inspect accounts, aliases, inboxes, and automation rules. Read-only views and automation previews do not create or delete aliases.
+4. Check service health with the bearer token:
+
+```
+curl -fsS -H "Authorization: Bearer $ICLOUD_HME_API_TOKEN" http://127.0.0.1:8081/api/health
+```
+
+The browser session endpoint is `GET /api/auth/session`; Compose also uses it for its health check. Health responses do not expose Cookies, App Passwords, account details, or data paths.
+
+### Security, backup, and upgrades
+
+- Use mode `0700` for Linux/macOS data directories and mode `0600` for secret files. On Windows use a dedicated service account and restrictive ACLs. Restrict access to Docker bind-mounted directories as well.
+- `accounts.json` may contain iCloud Cookies, App Passwords, and proxy credentials. `platform-auth.json` stores the administrator password hash. Email notification data may contain the 163 authorization code, and Webhook data contains the signing secret. Never publish these files, `.env`, launchd plists, or logs.
+- Before backing up, pause automation in the Web UI and stop the service or container so accounts, platform authentication, and logs represent one point in time. See [DEPLOYMENT.md](DEPLOYMENT.md) for verified archive, restore confirmation, and rollback-directory procedures.
+- On Linux/macOS, create archives into a restricted backup directory only after stopping the service. On Windows, use `scripts/backup-data.ps1` and `scripts/verify-data-backup.ps1`. Keep the old data directory until the restored copy has been accepted.
+- During an upgrade replace only the binary, image, or build output and keep the original data path. Verify health, accounts, and automation after restart; roll back the binary or image if needed instead of starting with an empty directory.
+- `DELETE /api/aliases/:id`, alias deactivation, and account deletion change real iCloud data. Do not use them for deployment acceptance. Do not run `docker compose down -v`, `rm -rf`, or clear the data directory while troubleshooting; back up first and use read-only checks or automation preview.
