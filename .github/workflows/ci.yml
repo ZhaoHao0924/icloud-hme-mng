@@ -170,6 +170,37 @@ jobs:
             echo "::error title=Release binary ELF verification failed::$error_message"
             exit 1
           fi
+      - name: Smoke test the Linux release binary
+        id: linux-binary-smoke
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/ci-linux-binary-smoke.sh build/icloud-hme 18082 2>&1 | tee "$RUNNER_TEMP/linux-binary-smoke.log"
+      - name: Publish Linux binary smoke diagnostics
+        if: steps.linux-binary-smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo '### Linux binary smoke output'
+            echo
+            echo '```text'
+            tail -n 120 "$RUNNER_TEMP/linux-binary-smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Annotate Linux binary smoke diagnostics
+        if: steps.linux-binary-smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line//'%'/'%25'}"
+            line="${line//$'\r'/'%0D'}"
+            line="${line//$'\n'/'%0A'}"
+            printf '::error title=Linux binary smoke diagnostics::%s\n' "$line"
+          done < <(tail -n 40 "$RUNNER_TEMP/linux-binary-smoke.log")
+      - name: Fail after Linux binary smoke diagnostics
+        if: steps.linux-binary-smoke.outcome == 'failure'
+        run: exit 1
       - name: Plant stale embedded asset sentinel
         run: |
           printf 'stale embedded asset sentinel\n' > internal/webui/dist/assets/ci-stale-sentinel.js

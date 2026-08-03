@@ -44,8 +44,8 @@
 
 ## 完成记录
 
-- [ ] `go test -race ./...` 已在具备 `gcc` 的环境通过。
-- [ ] Docker 镜像构建、挂载数据目录启动与重启持久化通过。
+- [x] `go test -race ./...` 已在具备 `gcc` 的环境通过：GitHub Actions Run 23。
+- [x] Docker 镜像构建、挂载数据目录启动与重启持久化通过：GitHub Actions Run 23。
 - [x] 隔离备份、清单校验与回滚恢复烟测通过：`scripts/backup-restore-smoke.ps1`。
 - [x] Windows 原生发布烟测已通过：`scripts/windows-release-smoke.ps1 -Version fe306-api-token-smoke -SkipNpmCi -Port 18083` 验证根页面、深链接、静态缓存、安全响应头、Bearer 鉴权、404 和重启持久化；临时服务与数据目录已清理。
 - [ ] Linux 发布二进制根页面、深链接、静态缓存和健康检查通过。
