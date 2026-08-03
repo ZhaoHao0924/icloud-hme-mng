@@ -261,3 +261,9 @@ Updated: 2026-08-03 (Asia/Shanghai)
 - 当前服务保持在 `127.0.0.1:8081`，未重建数据目录或重置平台管理员配置；`/api/auth/session` 返回账号配置存在但当前浏览器会话未登录。
 - 验证通过：`go test -count=1 ./...`、`go vet ./...`、`npm test`（160/160）、`npm run lint`、`npm run typecheck`、`npm run format:check`、`npm run build` 和 `npm run test:e2e:mock`（34/34）。
 - `go test -race ./...` 仍待具备 `gcc`/CGO 的 Linux 或 CI 环境；真实 iCloud、Docker 和 Linux 发布烟测仍属于外部验收，不在本机擅自执行写操作。
+
+## 2026-08-03 本机发布烟测
+
+- `scripts/backup-restore-smoke.ps1` 通过：备份清单校验、恢复、旧数据替换和回滚目录保留均已验证，使用的是系统临时目录。
+- `scripts/windows-release-smoke.ps1 -Version github-push-smoke -SkipNpmCi -Port 18083` 通过：嵌入资源、平台鉴权、SPA fallback、缓存/安全响应头、404、Bearer Token 兼容性和重启持久化均已验证。
+- `build/icloud-hme` 已生成 Linux amd64 ELF 发布二进制（约 27.96 MiB）；Docker、Linux 运行时、`go test -race` 和真实 iCloud 账户验收仍待对应外部环境。
