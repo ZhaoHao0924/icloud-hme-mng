@@ -69,7 +69,7 @@ printf '::add-mask::%s\n' "$api_token"
 start_container
 
 test "$(curl --silent --show-error --output "$unauthenticated_health_body" --write-out '%{http_code}' "$base_url/api/health")" = "401"
-jq --exit-status '.success == false and .code == "api_token_invalid"' "$unauthenticated_health_body" >/dev/null
+jq --exit-status '.success == false and .code == "platform_auth_setup_required"' "$unauthenticated_health_body" >/dev/null
 test "$(curl --silent --show-error --output "$invalid_token_health_body" --write-out '%{http_code}' --header "Authorization: Bearer ${api_token}.invalid" "$base_url/api/health")" = "401"
 jq --exit-status '.success == false and .code == "api_token_invalid"' "$invalid_token_health_body" >/dev/null
 
