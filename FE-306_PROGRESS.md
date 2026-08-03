@@ -1,6 +1,6 @@
 # FE-306 Progress Handoff
 
-Updated: 2026-08-03 (Asia/Shanghai)
+Updated: 2026-08-04 (Asia/Shanghai)
 
 ## Completed
 
@@ -33,8 +33,8 @@ Updated: 2026-08-03 (Asia/Shanghai)
 
 ## Next Session
 
-1. Run `go test -race ./...` in Linux CI or another environment with `gcc` and CGO enabled.
-2. Complete the Docker/Linux release smoke checks from `RELEASE_SMOKE_CHECKLIST.md`.
+1. Check GitHub Actions Run 26 for commit `4e8ab02`; it was queued when this handoff was written.
+2. Complete the local Docker release-runtime smoke check from `RELEASE_SMOKE_CHECKLIST.md`.
 3. After platform-admin login, verify alias automation status and the read-only preview with the configured account. Do not create, deactivate, reactivate, delete aliases, or change a real rule without explicit approval.
 4. Complete QA-008 with a controlled iCloud account; this requires external credentials and cannot be completed by local mocks.
 
@@ -267,3 +267,11 @@ Updated: 2026-08-03 (Asia/Shanghai)
 - `scripts/backup-restore-smoke.ps1` 通过：备份清单校验、恢复、旧数据替换和回滚目录保留均已验证，使用的是系统临时目录。
 - `scripts/windows-release-smoke.ps1 -Version github-push-smoke -SkipNpmCi -Port 18083` 通过：嵌入资源、平台鉴权、SPA fallback、缓存/安全响应头、404、Bearer Token 兼容性和重启持久化均已验证。
 - `build/icloud-hme` 已生成 Linux amd64 ELF 发布二进制（约 27.96 MiB）；Docker、Linux 运行时、`go test -race` 和真实 iCloud 账户验收仍待对应外部环境。
+
+## 2026-08-04 README 跨平台部署文档
+
+- README 已补充 Linux 原生二进制与 systemd、macOS launchd、Windows PowerShell/任务计划、Docker/Compose、Caddy/Nginx HTTPS、首次管理员认证、已有数据目录复用、备份恢复、升级和破坏性操作警告。
+- 同步修正 GitHub Releases、源码仓库和 GHCR 镜像地址；中英文部署章节均已更新。
+- 文档检查通过：README Prettier、代码围栏成对、相对链接存在、旧仓库引用清理和 `git diff --check`。
+- 提交 `4e8ab02` 已推送到 `main`，对应 GitHub Actions Run 26 截至今日结束时仍在排队。
+- 本次仅修改文档，没有启动服务、修改账户数据或执行别名创建、停用、恢复、删除等真实操作。
