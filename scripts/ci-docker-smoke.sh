@@ -13,6 +13,15 @@ invalid_token_health_body="$(mktemp)"
 api_token="$(openssl rand -hex 24)"
 base_url="http://127.0.0.1:18081"
 
+on_error() {
+  local status=$?
+  printf 'ci-docker-smoke failed at line %s (exit %s)\n' "${1:-unknown}" "$status" >&2
+  docker logs "$container_name" >&2 || true
+  exit "$status"
+}
+
+trap 'on_error "$LINENO"' ERR
+
 cleanup() {
   docker rm -f "$container_name" >/dev/null 2>&1 || true
   rm -rf "$data_dir" "$root_headers" "$asset_headers" "$root_body" "$unauthenticated_health_body" "$invalid_token_health_body"

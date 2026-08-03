@@ -176,7 +176,36 @@ jobs:
       - name: Build the Docker image
         run: docker build --build-arg VERSION=ci --tag icloud-hme:ci .
       - name: Smoke test the Docker image with a mounted data directory
-        run: bash scripts/ci-docker-smoke.sh icloud-hme:ci
+        id: docker-smoke
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/ci-docker-smoke.sh icloud-hme:ci 2>&1 | tee "$RUNNER_TEMP/docker-smoke.log"
+      - name: Publish Docker smoke diagnostics
+        if: steps.docker-smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo '### Docker smoke output'
+            echo
+            echo '```text'
+            tail -n 120 "$RUNNER_TEMP/docker-smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Annotate Docker smoke diagnostics
+        if: steps.docker-smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line//'%'/'%25'}"
+            line="${line//$'\r'/'%0D'}"
+            line="${line//$'\n'/'%0A'}"
+            printf '::error title=Docker smoke diagnostics::%s\n' "$line"
+          done < <(tail -n 40 "$RUNNER_TEMP/docker-smoke.log")
+      - name: Fail after Docker smoke diagnostics
+        if: steps.docker-smoke.outcome == 'failure'
+        run: exit 1
       - name: Upload release binary for diagnosis
         if: always()
         uses: actions/upload-artifact@v4
