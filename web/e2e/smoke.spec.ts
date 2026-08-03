@@ -1,6 +1,21 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
+  await page.route("**/api/auth/session", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        data: {
+          authenticated: true,
+          configured: true,
+          expires_at: "2099-01-01T00:00:00Z",
+          username: "e2e-admin",
+        },
+        success: true,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
   await page.route("**/api/accounts", (route) =>
     route.fulfill({
       body: JSON.stringify({ data: [], success: true }),
@@ -375,7 +390,7 @@ test("planned routes and not-found handling are reachable", async ({ page }) => 
     } else if (path.endsWith("/aliases")) {
       await expect(page.getByRole("heading", { level: 3, name: "暂无别名" })).toBeVisible();
     } else if (path.endsWith("/inbox")) {
-      await expect(page.getByLabel("账户", { exact: true })).toHaveValue("demo");
+      await expect(page.getByLabel("账户", { exact: true })).toHaveValue("demo@icloud.com");
       await expect(page.getByLabel("别名", { exact: true })).toHaveValue("");
       await expect(page.getByText("暂无匹配邮件")).toBeVisible();
     } else if (path === "/settings") {
