@@ -32,7 +32,34 @@ jobs:
       - name: Go static analysis
         run: go vet ./...
       - name: Go race tests
-        run: go test -race ./...
+        id: go-race
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race ./... 2>&1 | tee "$RUNNER_TEMP/go-race.log"
+      - name: Publish Go race diagnostics
+        if: steps.go-race.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo '### Go race test output'
+            echo
+            echo '```text'
+            tail -n 240 "$RUNNER_TEMP/go-race.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload Go race diagnostics
+        if: steps.go-race.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-race-diagnostics
+          path: ${{ runner.temp }}/go-race.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Fail after publishing Go race diagnostics
+        if: steps.go-race.outcome == 'failure'
+        run: exit 1
       - name: Install frontend dependencies
         run: npm ci --prefix web
       - name: Frontend static checks and unit tests
