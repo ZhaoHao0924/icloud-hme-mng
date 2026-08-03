@@ -4,6 +4,8 @@ import { getApiToken } from "./apiTokenSession";
 import {
   accountSchema,
   aliasActionSchema,
+  aliasCreationHistorySchema,
+  aliasAutomationPreviewSchema,
   aliasAutomationRunSchema,
   aliasAutomationSchema,
   aliasBatchResultSchema,
@@ -12,23 +14,38 @@ import {
   createdAliasSchema,
   deletedAccountSchema,
   deletedAliasSchema,
+  emailNotificationSchema,
+  emailNotificationTestSchema,
   healthSchema,
+  inboxMessageSchema,
   inboxSchema,
+  operationLogsSchema,
   otpChallengeSchema,
+  platformAuthStatusSchema,
   reloadedConfigSchema,
+  webhookNotificationSchema,
+  webhookNotificationTestSchema,
   type Account,
   type AliasAction,
+  type AliasCreationHistory,
   type AliasAutomation,
+  type AliasAutomationPreview,
   type AliasAutomationRun,
   type AliasBatchResult,
   type Aliases,
   type CreatedAlias,
   type DeletedAccount,
   type DeletedAlias,
+  type EmailNotification,
+  type EmailNotificationTestResult,
   type Health,
   type Inbox,
+  type InboxMessage,
   type OtpChallenge,
+  type PlatformAuthStatus,
   type ReloadedConfig,
+  type WebhookNotification,
+  type WebhookNotificationTestResult,
 } from "./schemas";
 
 const defaultApiBaseUrl = "/api";
@@ -87,16 +104,24 @@ export type CreateAliasesBatchInput = {
 export type AliasAutomationInput = {
   enabled: boolean;
   intervalMinutes: number;
+  allowedWeekdays?: number[];
+  executionWindowStart?: string;
+  executionWindowEnd?: string;
   scheduledBatchSize: number;
   minimumActive: number;
   targetActive: number;
   maxBatchSize: number;
+  maxTotalAliases: number;
+  maxFailureCount: number;
+  dailyCreationLimit: number;
+  targetCreated: number;
   labelPrefix: string;
 };
 
 export type InboxQuery = {
   accountId: string;
   alias?: string;
+  beforeUid?: string;
   limit?: number;
   days?: number;
 };
@@ -104,6 +129,24 @@ export type InboxQuery = {
 export type SetAppPasswordInput = {
   icloudEmail: string;
   appPassword: string;
+};
+
+export type PlatformAuthCredentials = {
+  password: string;
+  username: string;
+};
+
+export type EmailNotificationInput = {
+  enabled: boolean;
+  senderEmail: string;
+  authorizationCode: string;
+  recipientEmail: string;
+};
+
+export type WebhookNotificationInput = {
+  enabled: boolean;
+  url: string;
+  secret: string;
 };
 
 export type StartLoginResult = Account | OtpChallenge;
@@ -114,7 +157,7 @@ export type ApiClientOptions = {
   fetch?: typeof fetch;
 };
 
-type QueryValue = number | string | undefined;
+type QueryValue = boolean | number | string | undefined;
 
 type RequestConfig<TSchema extends z.ZodType> = {
   body?: unknown;
@@ -212,9 +255,19 @@ export function isApiTokenError(error: unknown) {
   return isApiError(error) && error.code === "api_token_invalid";
 }
 
+export function isPlatformAuthError(error: unknown) {
+  return (
+    isApiError(error) &&
+    (error.code === "platform_auth_required" || error.code === "platform_auth_setup_required")
+  );
+}
+
 export function isSessionExpiredError(error: unknown) {
   return (
-    isApiError(error) && !isApiTokenError(error) && (error.status === 401 || error.status === 403)
+    isApiError(error) &&
+    !isApiTokenError(error) &&
+    !isPlatformAuthError(error) &&
+    (error.status === 401 || error.status === 403)
   );
 }
 
@@ -224,6 +277,9 @@ export function getApiErrorMessage(error: unknown) {
   }
   if (isApiTokenError(error)) {
     return "需要 API 访问令牌，请输入后继续。";
+  }
+  if (isPlatformAuthError(error)) {
+    return "登录会话已失效，请重新登录。";
   }
   if (isSessionExpiredError(error)) {
     return "会话已过期，请更新 Cookie。";
@@ -267,6 +323,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       const response = await fetcher(resolvedUrl, {
         body: body === undefined ? undefined : JSON.stringify(body),
         cache: "no-store",
+        credentials: "same-origin",
         headers: {
           Accept: "application/json",
           ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
@@ -312,6 +369,60 @@ export function createApiClient(options: ApiClientOptions = {}) {
             message: "读取邮件超时，请稍后重试。",
           });
         }
+        throw error;
+      }
+      if (isApiError(error)) {
+        throw error;
+      }
+      throw new ApiError({
+        kind: "network",
+        message: "无法连接到本地服务，请确认服务已启动。",
+      });
+    } finally {
+      abortContext.cleanup();
+    }
+  }
+
+  async function requestText(path: string, signal?: AbortSignal): Promise<string> {
+    const abortContext = createRequestAbortContext(signal);
+    try {
+      const fetcher = configuredFetch ?? globalThis.fetch;
+      const requestUrl = createUrl(baseUrl, path);
+      const resolvedUrl =
+        configuredFetch || typeof window === "undefined"
+          ? requestUrl
+          : new URL(requestUrl, window.location.origin).toString();
+      const apiToken = apiTokenProvider()?.trim();
+      const response = await fetcher(resolvedUrl, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: {
+          Accept: "text/csv",
+          ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
+        },
+        method: "GET",
+        signal: abortContext.signal,
+      });
+      if (!response.ok) {
+        const payload = await responsePayload(response);
+        const envelope = apiEnvelopeSchema.safeParse(payload);
+        if (!envelope.success) {
+          throw new ApiError({
+            kind: "invalid_response",
+            message: "服务响应格式无效，请检查服务版本。",
+            status: response.status,
+          });
+        }
+        throw new ApiError({
+          code: envelope.data.code,
+          kind: "http",
+          message: envelope.data.message?.trim() || fallbackHttpMessage(response.status),
+          status: response.status,
+        });
+      }
+      return response.text();
+    } catch (error) {
+      if (isAbortError(error)) {
         throw error;
       }
       if (isApiError(error)) {
@@ -402,11 +513,92 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    downloadAliasCreationHistory(accountId: string, requestOptions?: ApiRequestOptions) {
+      return requestText(
+        endpointPath("accounts", accountId, "alias-creation-history.csv"),
+        requestOptions?.signal,
+      );
+    },
+
     getHealth(requestOptions?: ApiRequestOptions) {
       return request({
         method: "GET",
         path: "health",
         responseSchema: healthSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    getEmailNotification(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: "notifications/email",
+        responseSchema: emailNotificationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    getWebhookNotification(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: "notifications/webhook",
+        responseSchema: webhookNotificationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    getPlatformAuthSession(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: "auth/session",
+        responseSchema: platformAuthStatusSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    listOperationLogs(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: "logs",
+        query: { limit: 200 },
+        responseSchema: operationLogsSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    testEmailNotification(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: "notifications/email/test",
+        responseSchema: emailNotificationTestSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    testWebhookNotification(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: "notifications/webhook/test",
+        responseSchema: webhookNotificationTestSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    loginPlatform(input: PlatformAuthCredentials, requestOptions?: ApiRequestOptions) {
+      return request({
+        body: input,
+        method: "POST",
+        path: "auth/login",
+        responseSchema: platformAuthStatusSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    logoutPlatform(requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: "auth/logout",
+        responseSchema: platformAuthStatusSchema,
         signal: requestOptions?.signal,
       });
     },
@@ -439,6 +631,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    listAliasCreationHistory(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: endpointPath("accounts", accountId, "alias-creation-history"),
+        query: { limit: 100 },
+        responseSchema: aliasCreationHistorySchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     listInbox(query: InboxQuery, requestOptions?: ApiRequestOptions) {
       return request({
         method: "GET",
@@ -446,10 +648,23 @@ export function createApiClient(options: ApiClientOptions = {}) {
         query: {
           account_id: query.accountId,
           alias: query.alias,
+          before_uid: query.beforeUid,
           days: query.days,
+          include_preview: false,
           limit: query.limit,
         },
         responseSchema: inboxSchema,
+        signal: requestOptions?.signal,
+        timeoutMs: requestOptions?.timeoutMs,
+      });
+    },
+
+    getInboxMessage(accountId: string, messageId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "GET",
+        path: endpointPath("inbox", "messages", messageId),
+        query: { account_id: accountId },
+        responseSchema: inboxMessageSchema,
         signal: requestOptions?.signal,
         timeoutMs: requestOptions?.timeoutMs,
       });
@@ -465,11 +680,38 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    pauseAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: endpointPath("accounts", accountId, "alias-automation", "pause"),
+        responseSchema: aliasAutomationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    resumeAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: endpointPath("accounts", accountId, "alias-automation", "resume"),
+        responseSchema: aliasAutomationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     runAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
       return request({
         method: "POST",
         path: endpointPath("accounts", accountId, "alias-automation", "run"),
         responseSchema: aliasAutomationRunSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    previewAliasAutomation(accountId: string, requestOptions?: ApiRequestOptions) {
+      return request({
+        method: "POST",
+        path: endpointPath("accounts", accountId, "alias-automation", "preview"),
+        responseSchema: aliasAutomationPreviewSchema,
         signal: requestOptions?.signal,
       });
     },
@@ -500,6 +742,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    setupPlatformAuth(input: PlatformAuthCredentials, requestOptions?: ApiRequestOptions) {
+      return request({
+        body: input,
+        method: "POST",
+        path: "auth/setup",
+        responseSchema: platformAuthStatusSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     startLogin(accountId: string, password: string, requestOptions?: ApiRequestOptions) {
       return request({
         body: { password },
@@ -524,6 +776,35 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    updateEmailNotification(input: EmailNotificationInput, requestOptions?: ApiRequestOptions) {
+      return request({
+        body: {
+          authorization_code: input.authorizationCode,
+          enabled: input.enabled,
+          sender_email: input.senderEmail,
+          recipient_email: input.recipientEmail,
+        },
+        method: "PUT",
+        path: "notifications/email",
+        responseSchema: emailNotificationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
+    updateWebhookNotification(input: WebhookNotificationInput, requestOptions?: ApiRequestOptions) {
+      return request({
+        body: {
+          enabled: input.enabled,
+          secret: input.secret,
+          url: input.url,
+        },
+        method: "PUT",
+        path: "notifications/webhook",
+        responseSchema: webhookNotificationSchema,
+        signal: requestOptions?.signal,
+      });
+    },
+
     updateAliasAutomation(
       accountId: string,
       input: AliasAutomationInput,
@@ -533,10 +814,17 @@ export function createApiClient(options: ApiClientOptions = {}) {
         body: {
           enabled: input.enabled,
           interval_minutes: input.intervalMinutes,
+          allowed_weekdays: input.allowedWeekdays ?? [],
+          execution_window_start: input.executionWindowStart ?? "",
+          execution_window_end: input.executionWindowEnd ?? "",
           scheduled_batch_size: input.scheduledBatchSize,
           minimum_active: input.minimumActive,
           target_active: input.targetActive,
           max_batch_size: input.maxBatchSize,
+          max_total_aliases: input.maxTotalAliases,
+          max_failure_count: input.maxFailureCount,
+          daily_creation_limit: input.dailyCreationLimit,
+          target_created: input.targetCreated,
           label_prefix: input.labelPrefix,
         },
         method: "PUT",
@@ -572,7 +860,9 @@ export type ApiClient = ReturnType<typeof createApiClient>;
 export type {
   Account,
   AliasAction,
+  AliasCreationHistory,
   AliasAutomation,
+  AliasAutomationPreview,
   AliasAutomationRun,
   AliasBatchResult,
   Aliases,
@@ -581,5 +871,11 @@ export type {
   DeletedAlias,
   Health,
   Inbox,
+  InboxMessage,
+  EmailNotification,
+  EmailNotificationTestResult,
+  PlatformAuthStatus,
   ReloadedConfig,
+  WebhookNotification,
+  WebhookNotificationTestResult,
 };

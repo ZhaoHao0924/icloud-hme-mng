@@ -1,8 +1,9 @@
-import { Cloud, KeyRound, Settings, Users } from "lucide-react";
+import { Cloud, KeyRound, LogOut, Settings, Users } from "lucide-react";
 import { NavLink, useLocation, useNavigation, useOutlet } from "react-router-dom";
 
 import { LoadingState } from "../components/LoadingState";
 import { useApiToken } from "./apiTokenContext";
+import { usePlatformAuth } from "./platformAuthContext";
 
 const navigation = [
   { to: "/accounts", label: "账户", icon: Users },
@@ -33,7 +34,13 @@ export function App() {
   const navigationState = useNavigation().state;
   const outlet = useOutlet();
   const isNavigating = navigationState !== "idle";
-  const { hasApiToken, openApiTokenDialog } = useApiToken();
+  const { clearApiToken, hasApiToken, openApiTokenDialog } = useApiToken();
+  const { isLoggingOut, logout, status } = usePlatformAuth();
+
+  async function handleLogout() {
+    clearApiToken();
+    await logout();
+  }
 
   return (
     <div className="app-shell">
@@ -64,6 +71,7 @@ export function App() {
         <header className="topbar">
           <h1>{pageTitle(pathname)}</h1>
           <div className="topbar-actions">
+            {status?.username ? <span className="topbar-user">{status.username}</span> : null}
             <button
               className={`icon-button topbar-token-button${hasApiToken ? " topbar-token-configured" : ""}`}
               type="button"
@@ -72,6 +80,16 @@ export function App() {
               onClick={openApiTokenDialog}
             >
               <KeyRound size={17} aria-hidden="true" />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="退出登录"
+              title="退出登录"
+              disabled={isLoggingOut}
+              onClick={() => void handleLogout()}
+            >
+              <LogOut size={17} aria-hidden="true" />
             </button>
           </div>
         </header>

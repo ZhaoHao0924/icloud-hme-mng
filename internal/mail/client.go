@@ -5,13 +5,14 @@
 package mail
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message/charset"
+	"golang.org/x/net/html"
 )
 
 const (
@@ -55,6 +57,13 @@ type Message struct {
 	Preview string `json:"preview"`
 }
 
+// MessagePage is one stable page of inbox messages. NextBeforeUID is zero
+// when there are no older messages matching the current filter.
+type MessagePage struct {
+	Messages      []Message
+	NextBeforeUID uint32
+}
+
 // FullMessage 是一封邮件的完整内容(含正文)。
 type FullMessage struct {
 	Message
@@ -69,6 +78,8 @@ type Client struct {
 	cli         imapSession
 	dial        imapDialer
 	now         func() time.Time
+	selected    string
+	selectedRO  bool
 }
 
 // NewClient 创建 IMAP 客户端。需在调用其它方法前先 Connect。
@@ -86,6 +97,7 @@ func (c *Client) Connect() error {
 	if c.cli != nil {
 		return nil
 	}
+	c.resetSelectedMailbox()
 	addr := fmt.Sprintf("%s:%d", IMAPServer, IMAPPort)
 	dial := c.dial
 	if dial == nil {
@@ -109,10 +121,12 @@ func (c *Client) Connect() error {
 // Disconnect 登出并关闭连接。
 func (c *Client) Disconnect() {
 	if c.cli == nil {
+		c.resetSelectedMailbox()
 		return
 	}
 	cli := c.cli
 	c.cli = nil
+	c.resetSelectedMailbox()
 	if err := cli.Logout(); err != nil {
 		_ = cli.Terminate()
 	}
@@ -132,8 +146,11 @@ func (c *Client) InboxCount() (int, error) {
 	}
 	mbox, err := c.cli.Select("INBOX", false)
 	if err != nil {
+		c.resetSelectedMailbox()
 		return 0, err
 	}
+	c.selected = "INBOX"
+	c.selectedRO = false
 	return int(mbox.Messages), nil
 }
 
@@ -142,15 +159,36 @@ func (c *Client) InboxCount() (int, error) {
 // days 用于过滤只看近 N 天的邮件(0 表示不限制)。
 // 返回按时间倒序排列。
 func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
+	page, err := c.ListInboxPage(limit, days, 0)
+	return page.Messages, err
+}
+
+// ListInboxSummaries 仅拉取邮件头，不读取正文。用于低延迟展示收件箱列表。
+func (c *Client) ListInboxSummaries(limit int, days int) ([]Message, error) {
+	page, err := c.ListInboxSummariesPage(limit, days, 0)
+	return page.Messages, err
+}
+
+// ListInboxPage 拉取由 beforeUID 划定的一页收件箱邮件。
+func (c *Client) ListInboxPage(limit int, days int, beforeUID uint32) (MessagePage, error) {
+	return c.listInboxPage(limit, days, beforeUID, true)
+}
+
+// ListInboxSummariesPage 仅拉取一页邮件头，不读取正文。
+func (c *Client) ListInboxSummariesPage(limit int, days int, beforeUID uint32) (MessagePage, error) {
+	return c.listInboxPage(limit, days, beforeUID, false)
+}
+
+func (c *Client) listInboxPage(limit int, days int, beforeUID uint32, includePreview bool) (MessagePage, error) {
 	if c.cli == nil {
-		return nil, fmt.Errorf("未连接")
+		return MessagePage{}, fmt.Errorf("未连接")
 	}
 	if limit <= 0 {
 		limit = 50
 	}
 
-	if _, err := c.cli.Select("INBOX", true); err != nil {
-		return nil, err
+	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
+		return MessagePage{}, err
 	}
 	criteria := imap.NewSearchCriteria()
 	if days > 0 {
@@ -158,25 +196,58 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 	}
 	uids, err := c.cli.UidSearch(criteria)
 	if err != nil {
-		return nil, err
+		c.resetSelectedMailbox()
+		return MessagePage{}, err
 	}
-	return c.fetchByUIDs(uids, limit)
+	return c.fetchUIDPage(uids, limit, beforeUID, includePreview)
 }
 
 // FindByRecipient 查找发给指定隐私邮箱别名的邮件。
 //
 // 先尝试 IMAP TO 搜索;失败则拉取收件箱后本地过滤。
 func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Message, error) {
+	page, err := c.FindByRecipientPage(recipient, limit, days, 0)
+	return page.Messages, err
+}
+
+// FindByRecipientSummaries 按收件人筛选邮件，但仅拉取邮件头。
+func (c *Client) FindByRecipientSummaries(recipient string, limit int, days int) ([]Message, error) {
+	page, err := c.FindByRecipientSummariesPage(recipient, limit, days, 0)
+	return page.Messages, err
+}
+
+// FindByRecipientPage 查找由 beforeUID 划定的一页指定收件人邮件。
+func (c *Client) FindByRecipientPage(recipient string, limit int, days int, beforeUID uint32) (MessagePage, error) {
+	return c.findByRecipientPage(recipient, limit, days, beforeUID, true)
+}
+
+// FindByRecipientSummariesPage 查找一页指定收件人邮件头。
+func (c *Client) FindByRecipientSummariesPage(
+	recipient string,
+	limit int,
+	days int,
+	beforeUID uint32,
+) (MessagePage, error) {
+	return c.findByRecipientPage(recipient, limit, days, beforeUID, false)
+}
+
+func (c *Client) findByRecipientPage(
+	recipient string,
+	limit int,
+	days int,
+	beforeUID uint32,
+	includePreview bool,
+) (MessagePage, error) {
 	if c.cli == nil {
-		return nil, fmt.Errorf("未连接")
+		return MessagePage{}, fmt.Errorf("未连接")
 	}
 	if limit <= 0 {
 		limit = 20
 	}
 
 	// 先尝试服务端 TO 搜索
-	if _, err := c.cli.Select("INBOX", true); err != nil {
-		return nil, err
+	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
+		return MessagePage{}, err
 	}
 	criteria := imap.NewSearchCriteria()
 	criteria.Header.Add("To", recipient)
@@ -185,42 +256,134 @@ func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Messa
 	}
 	uids, err := c.cli.UidSearch(criteria)
 	if err == nil && len(uids) > 0 {
-		return c.fetchByUIDs(uids, limit)
+		return c.fetchUIDPage(uids, limit, beforeUID, includePreview)
+	}
+	if err != nil {
+		c.resetSelectedMailbox()
 	}
 
-	// fallback: 拉取收件箱后本地过滤
-	all, err := c.ListInbox(limit*3, days)
-	if err != nil {
-		return nil, err
-	}
-	recipient = strings.ToLower(recipient)
-	var out []Message
-	for _, m := range all {
-		if strings.Contains(strings.ToLower(m.To), recipient) {
-			out = append(out, m)
-			if len(out) >= limit {
-				break
-			}
-		}
-	}
-	return out, nil
+	return c.findByRecipientFallbackPage(recipient, limit, days, beforeUID, includePreview)
 }
 
-func (c *Client) fetchByUIDs(uids []uint32, limit int) ([]Message, error) {
-	if len(uids) == 0 {
-		return []Message{}, nil
+// findByRecipientFallbackPage scans headers in bounded chunks when the IMAP
+// server does not return TO search results. The cursor remains a mailbox UID,
+// so nonmatching messages never create duplicates or gaps between pages.
+func (c *Client) findByRecipientFallbackPage(
+	recipient string,
+	limit int,
+	days int,
+	beforeUID uint32,
+	includePreview bool,
+) (MessagePage, error) {
+	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
+		return MessagePage{}, err
 	}
+	criteria := imap.NewSearchCriteria()
+	if days > 0 {
+		criteria.Since = c.currentTime().AddDate(0, 0, -days)
+	}
+	uids, err := c.cli.UidSearch(criteria)
+	if err != nil {
+		c.resetSelectedMailbox()
+		return MessagePage{}, err
+	}
+
+	candidates := eligibleInboxUIDs(uids, beforeUID)
+	if len(candidates) == 0 {
+		return MessagePage{Messages: []Message{}}, nil
+	}
+	scanLimit := limit * 3
+	if scanLimit < 50 {
+		scanLimit = 50
+	}
+	recipient = strings.ToLower(recipient)
+	matchedUIDs := make([]uint32, 0, limit+1)
+	matchedHeaders := make(map[uint32]Message, limit+1)
+	for end := len(candidates); end > 0 && len(matchedUIDs) <= limit; {
+		start := end - scanLimit
+		if start < 0 {
+			start = 0
+		}
+		headers, fetchErr := c.fetchSelectedUIDs(candidates[start:end], false)
+		if fetchErr != nil {
+			return MessagePage{}, fetchErr
+		}
+		headersByUID := make(map[uint32]Message, len(headers))
+		for _, header := range headers {
+			uid, parseErr := strconv.ParseUint(header.ID, 10, 32)
+			if parseErr == nil && uid > 0 {
+				headersByUID[uint32(uid)] = header
+			}
+		}
+		for index := end - 1; index >= start && len(matchedUIDs) <= limit; index-- {
+			uid := candidates[index]
+			header, found := headersByUID[uid]
+			if found && strings.Contains(strings.ToLower(header.To), recipient) {
+				matchedUIDs = append(matchedUIDs, uid)
+				matchedHeaders[uid] = header
+			}
+		}
+		end = start
+	}
+
+	hasMore := len(matchedUIDs) > limit
+	if hasMore {
+		matchedUIDs = matchedUIDs[:limit]
+	}
+	messages := make([]Message, 0, len(matchedUIDs))
+	if includePreview {
+		messages, err = c.fetchSelectedUIDs(matchedUIDs, true)
+		if err != nil {
+			return MessagePage{}, err
+		}
+	} else {
+		for _, uid := range matchedUIDs {
+			messages = append(messages, matchedHeaders[uid])
+		}
+		sortMessagesNewestFirst(messages)
+	}
+	page := MessagePage{Messages: messages}
+	if hasMore && len(matchedUIDs) > 0 {
+		page.NextBeforeUID = smallestUID(matchedUIDs)
+	}
+	return page, nil
+}
+
+func (c *Client) fetchByUIDs(uids []uint32, limit int, includePreview bool) ([]Message, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	uids = mostRecentUIDs(uids, limit)
+	return c.fetchSelectedUIDs(uids, includePreview)
+}
+
+func (c *Client) fetchUIDPage(uids []uint32, limit int, beforeUID uint32, includePreview bool) (MessagePage, error) {
+	pageUIDs, nextBeforeUID := inboxPageUIDs(uids, limit, beforeUID)
+	if len(pageUIDs) == 0 {
+		return MessagePage{Messages: []Message{}}, nil
+	}
+	messages, err := c.fetchSelectedUIDs(pageUIDs, includePreview)
+	if err != nil {
+		return MessagePage{}, err
+	}
+	return MessagePage{Messages: messages, NextBeforeUID: nextBeforeUID}, nil
+}
+
+func (c *Client) fetchSelectedUIDs(uids []uint32, includePreview bool) ([]Message, error) {
+	if len(uids) == 0 {
+		return []Message{}, nil
+	}
 	seqset := new(imap.SeqSet)
 	for _, uid := range uids {
 		seqset.AddNum(uid)
 	}
 
-	section := previewBodySection()
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
+	var section *imap.BodySectionName
+	if includePreview {
+		section = previewBodySection()
+		items = append(items, section.FetchItem())
+	}
 	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	go func() {
@@ -229,7 +392,11 @@ func (c *Client) fetchByUIDs(uids []uint32, limit int) ([]Message, error) {
 
 	var out []Message
 	for msg := range messages {
-		out = append(out, toMessageWithBody(msg, section))
+		if includePreview {
+			out = append(out, toMessageWithBody(msg, section))
+		} else {
+			out = append(out, toMessage(msg))
+		}
 	}
 	if err := <-done; err != nil {
 		return nil, err
@@ -238,13 +405,107 @@ func (c *Client) fetchByUIDs(uids []uint32, limit int) ([]Message, error) {
 	return out, nil
 }
 
+// GetPreview 获取单封邮件的安全文本预览，正文读取量受 maxPreviewFetchBytes 限制。
+func (c *Client) GetPreview(uid uint32) (*Message, error) {
+	if c.cli == nil {
+		return nil, fmt.Errorf("未连接")
+	}
+	if uid == 0 {
+		return nil, fmt.Errorf("邮件 UID 无效")
+	}
+	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
+		return nil, err
+	}
+
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uid)
+	section := previewBodySection()
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
+	messages := make(chan *imap.Message, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.cli.UidFetch(seqset, items, messages)
+	}()
+
+	var fetched *imap.Message
+	for message := range messages {
+		fetched = message
+	}
+	if err := <-done; err != nil {
+		c.resetSelectedMailbox()
+		return nil, err
+	}
+	if fetched == nil {
+		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
+	}
+	preview := toMessageWithBody(fetched, section)
+	return &preview, nil
+}
+
+func (c *Client) ensureSelectedMailbox(name string, readOnly bool) error {
+	if c.cli == nil {
+		return fmt.Errorf("未连接")
+	}
+	if c.selected == name && c.selectedRO == readOnly {
+		return nil
+	}
+	if _, err := c.cli.Select(name, readOnly); err != nil {
+		c.resetSelectedMailbox()
+		return err
+	}
+	c.selected = name
+	c.selectedRO = readOnly
+	return nil
+}
+
+func (c *Client) resetSelectedMailbox() {
+	c.selected = ""
+	c.selectedRO = false
+}
+
 func mostRecentUIDs(uids []uint32, limit int) []uint32 {
+	page, _ := inboxPageUIDs(uids, limit, 0)
+	return page
+}
+
+func inboxPageUIDs(uids []uint32, limit int, beforeUID uint32) ([]uint32, uint32) {
+	if limit <= 0 {
+		limit = 20
+	}
+	ordered := eligibleInboxUIDs(uids, beforeUID)
+	if len(ordered) <= limit {
+		return ordered, 0
+	}
+	first := len(ordered) - limit
+	return ordered[first:], ordered[first]
+}
+
+func eligibleInboxUIDs(uids []uint32, beforeUID uint32) []uint32 {
 	ordered := append([]uint32(nil), uids...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-	if limit > 0 && len(ordered) > limit {
-		ordered = ordered[len(ordered)-limit:]
+	filtered := make([]uint32, 0, len(ordered))
+	var previous uint32
+	for _, uid := range ordered {
+		if uid == 0 || (beforeUID > 0 && uid >= beforeUID) || uid == previous {
+			continue
+		}
+		filtered = append(filtered, uid)
+		previous = uid
 	}
-	return ordered
+	return filtered
+}
+
+func smallestUID(uids []uint32) uint32 {
+	if len(uids) == 0 {
+		return 0
+	}
+	smallest := uids[0]
+	for _, uid := range uids[1:] {
+		if uid < smallest {
+			smallest = uid
+		}
+	}
+	return smallest
 }
 
 func previewBodySection() *imap.BodySectionName {
@@ -287,7 +548,7 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
-	if _, err := c.cli.Select("INBOX", true); err != nil {
+	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
 		return nil, err
 	}
 
@@ -303,6 +564,7 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 
 	msg := <-messages
 	if err := <-done; err != nil {
+		c.resetSelectedMailbox()
 		return nil, err
 	}
 	if msg == nil {
@@ -394,53 +656,222 @@ func decodeHeader(s string) string {
 	return out
 }
 
-var htmlTag = regexp.MustCompile(`<[^>]+>`)
-
-// readBody 读取邮件正文,优先 text/plain,其次从 HTML 提取纯文本。
-func readBody(msg *mail.Message) (string, error) {
-	ct := msg.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/html") {
-		raw, _ := io.ReadAll(msg.Body)
-		// quoted-printable 解码
-		if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-			r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-			raw, _ = io.ReadAll(r)
-		}
-		return stripHTML(string(raw)), nil
-	}
-	// 默认当 text/plain
-	raw, err := io.ReadAll(msg.Body)
-	if err != nil {
-		return "", err
-	}
-	if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-		r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-		raw, _ = io.ReadAll(r)
-	}
-	return string(raw), nil
+type mailHeader interface {
+	Get(string) string
 }
 
-// stripHTML 粗略剥离 HTML 标签,保留可读文本。
-func stripHTML(html string) string {
-	// 换行标签转换行
-	html = strings.ReplaceAll(html, "<br>", "\n")
-	html = strings.ReplaceAll(html, "<br/>", "\n")
-	html = strings.ReplaceAll(html, "<br />", "\n")
-	html = strings.ReplaceAll(html, "</p>", "\n")
-	html = strings.ReplaceAll(html, "</div>", "\n")
-	html = strings.ReplaceAll(html, "</tr>", "\n")
-	html = strings.ReplaceAll(html, "<li>", "\n- ")
-	// 去掉所有标签
-	html = htmlTag.ReplaceAllString(html, "")
-	// 反转义常见实体
-	html = strings.ReplaceAll(html, "&nbsp;", " ")
-	html = strings.ReplaceAll(html, "&amp;", "&")
-	html = strings.ReplaceAll(html, "&lt;", "<")
-	html = strings.ReplaceAll(html, "&gt;", ">")
-	// 压缩多余空白
-	lines := strings.Split(html, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimSpace(l)
+type mailBodyCandidates struct {
+	html  string
+	plain string
+}
+
+// readBody 读取邮件正文。multipart 邮件优先采用 text/plain，仅有 HTML 时提取可见文本。
+func readBody(msg *mail.Message) (string, error) {
+	candidates, err := readBodyCandidates(msg.Header, msg.Body)
+	if plain := normalizePlainText(candidates.plain); plain != "" {
+		return plain, nil
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	if candidates.html != "" {
+		return stripHTML(candidates.html), nil
+	}
+	return "", err
+}
+
+func readBodyCandidates(header mailHeader, body io.Reader) (mailBodyCandidates, error) {
+	mediaType, params := parseMailMediaType(header.Get("Content-Type"))
+	var disposition string
+	var dispositionParams map[string]string
+	if rawDisposition := strings.TrimSpace(header.Get("Content-Disposition")); rawDisposition != "" {
+		disposition, dispositionParams = parseMailMediaType(rawDisposition)
+	}
+	if disposition == "attachment" || dispositionParams["filename"] != "" {
+		return mailBodyCandidates{}, nil
+	}
+
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return mailBodyCandidates{}, fmt.Errorf("multipart 邮件缺少 boundary")
+		}
+		reader := multipart.NewReader(body, boundary)
+		var candidates mailBodyCandidates
+		var firstErr error
+		for {
+			part, partErr := reader.NextRawPart()
+			if errors.Is(partErr, io.EOF) {
+				break
+			}
+			if partErr != nil {
+				if firstErr == nil {
+					firstErr = partErr
+				}
+				break
+			}
+
+			partCandidates, candidateErr := readBodyCandidates(part.Header, part)
+			_ = part.Close()
+			if candidateErr != nil && firstErr == nil {
+				firstErr = candidateErr
+			}
+			if candidates.plain == "" && strings.TrimSpace(partCandidates.plain) != "" {
+				candidates.plain = partCandidates.plain
+			}
+			if candidates.html == "" && strings.TrimSpace(partCandidates.html) != "" {
+				candidates.html = partCandidates.html
+			}
+		}
+		return candidates, firstErr
+	}
+
+	if mediaType != "text/plain" && mediaType != "text/html" {
+		return mailBodyCandidates{}, nil
+	}
+	decoded, err := decodeMailBody(header, params, body)
+	if err != nil {
+		return mailBodyCandidates{}, err
+	}
+	raw, readErr := io.ReadAll(decoded)
+	if readErr != nil && len(raw) == 0 {
+		return mailBodyCandidates{}, readErr
+	}
+	text := strings.ToValidUTF8(string(raw), "")
+	if mediaType == "text/html" || looksLikeHTML(text) {
+		return mailBodyCandidates{html: text}, nil
+	}
+	return mailBodyCandidates{plain: text}, nil
+}
+
+func parseMailMediaType(value string) (string, map[string]string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "text/plain", nil
+	}
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err == nil {
+		return strings.ToLower(mediaType), params
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0]))
+	return mediaType, nil
+}
+
+func decodeMailBody(header mailHeader, params map[string]string, body io.Reader) (io.Reader, error) {
+	var decoded io.Reader = body
+	switch strings.ToLower(strings.TrimSpace(header.Get("Content-Transfer-Encoding"))) {
+	case "base64":
+		decoded = base64.NewDecoder(base64.StdEncoding, decoded)
+	case "quoted-printable":
+		decoded = quotedprintable.NewReader(decoded)
+	}
+
+	charsetName := strings.TrimSpace(params["charset"])
+	if charsetName == "" || strings.EqualFold(charsetName, "utf-8") || strings.EqualFold(charsetName, "us-ascii") {
+		return decoded, nil
+	}
+	return charset.Reader(charsetName, decoded)
+}
+
+func looksLikeHTML(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "<!doctype html") ||
+		strings.Contains(lower, "<html") ||
+		strings.Contains(lower, "<body")
+}
+
+func normalizePlainText(text string) string {
+	text = strings.ToValidUTF8(text, "")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.ReplaceAll(text, "\u00a0", " ")
+	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" && (len(cleaned) == 0 || cleaned[len(cleaned)-1] == "") {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n")
+}
+
+// stripHTML 提取浏览器中实际可见的文本，忽略样式、脚本和其他非正文节点。
+func stripHTML(rawHTML string) string {
+	document, err := html.Parse(strings.NewReader(rawHTML))
+	if err != nil {
+		return ""
+	}
+	var text strings.Builder
+	appendHTMLText(&text, document)
+	return normalizeHTMLText(text.String())
+}
+
+func appendHTMLText(text *strings.Builder, node *html.Node) {
+	if node.Type == html.ElementNode && isHiddenHTMLElement(node.Data) {
+		return
+	}
+	if node.Type == html.TextNode {
+		text.WriteString(node.Data)
+		return
+	}
+
+	isBlock := node.Type == html.ElementNode && isBlockHTMLElement(node.Data)
+	if isBlock {
+		text.WriteByte('\n')
+		if node.Data == "li" {
+			text.WriteString("- ")
+		}
+	}
+	if node.Type == html.ElementNode && (node.Data == "br" || node.Data == "hr") {
+		text.WriteByte('\n')
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		appendHTMLText(text, child)
+	}
+	if node.Type == html.ElementNode && (node.Data == "td" || node.Data == "th") {
+		text.WriteByte(' ')
+	}
+	if isBlock {
+		text.WriteByte('\n')
+	}
+}
+
+func isHiddenHTMLElement(name string) bool {
+	switch name {
+	case "canvas", "head", "noscript", "script", "style", "svg", "template":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBlockHTMLElement(name string) bool {
+	switch name {
+	case "address", "article", "aside", "blockquote", "body", "dd", "div", "dl", "dt",
+		"fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+		"h5", "h6", "header", "html", "li", "main", "nav", "ol", "p", "pre",
+		"section", "table", "tr", "ul":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeHTMLText(text string) string {
+	text = strings.ReplaceAll(text, "\u00a0", " ")
+	lines := strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" && (len(cleaned) == 0 || cleaned[len(cleaned)-1] == "") {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n")
 }

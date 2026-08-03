@@ -73,6 +73,32 @@ test("browser worker serves success fixtures", async ({ page }) => {
   await expect(page.getByText("2 个账户")).toBeVisible();
 });
 
+test("platform login protects routes, restores the requested page, and clears access on logout", async ({
+  page,
+}) => {
+  await page.goto("/accounts/acc_primary/inbox?mock=platform-login&source=protected");
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+
+  await expect(page.getByRole("heading", { level: 1, name: "登录平台" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "收件箱" })).toHaveCount(0);
+
+  const password = page.getByLabel("管理员密码");
+  await password.fill("correct-horse-battery-staple");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+
+  await expect(page).toHaveURL(
+    /\/accounts\/acc_primary\/inbox\?mock=platform-login&source=protected$/,
+  );
+  await expect(page.getByRole("heading", { level: 1, name: "收件箱" })).toBeVisible();
+
+  await page.getByRole("button", { name: "退出登录" }).click();
+
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByRole("heading", { level: 1, name: "登录平台" })).toBeVisible();
+  await expect(page.getByLabel("管理员密码")).toHaveValue("");
+  await expect(page.getByRole("heading", { level: 1, name: "收件箱" })).toHaveCount(0);
+});
+
 test("account detail keeps context while switching tabs and fits responsive baselines", async ({
   page,
 }) => {
@@ -117,12 +143,12 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
   await page.goto("/accounts/acc_primary/inbox?mock=success&source=workspace");
   await waitForMockWorker(page, "收件箱");
 
-  const accountSelect = page.getByLabel("账户");
-  const aliasSelect = page.getByLabel("别名");
+  const accountInput = page.getByLabel("账户");
+  const aliasInput = page.getByLabel("别名");
   const daysSelect = page.getByLabel("时间范围");
   const limitSelect = page.getByLabel("数量");
-  await expect(accountSelect).toHaveValue("acc_primary");
-  await expect(aliasSelect).toHaveValue("");
+  await expect(accountInput).toHaveValue("primary@icloud.com");
+  await expect(aliasInput).toHaveValue("");
   await expect(daysSelect).toHaveValue("7");
   await expect(limitSelect).toHaveValue("20");
   const messageList = page.getByRole("list", { name: "邮件摘要列表" });
@@ -141,10 +167,11 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
       url.pathname === "/api/inbox" && url.searchParams.get("alias") === "quiet-orchid@icloud.com"
     );
   });
-  await aliasSelect.selectOption("quiet-orchid@icloud.com");
+  await aliasInput.fill("quiet-orchid@icloud.com");
+  await aliasInput.press("Enter");
   await filteredRequest;
   await expect(page).toHaveURL(/mock=success.*source=workspace.*alias=quiet-orchid%40icloud.com/);
-  await expect(aliasSelect).toHaveValue("quiet-orchid@icloud.com");
+  await expect(aliasInput).toHaveValue("quiet-orchid@icloud.com");
 
   const rangeRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
@@ -173,12 +200,13 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
   await refreshRequest;
   await expect(page).toHaveURL(/alias=quiet-orchid%40icloud.com.*days=3.*limit=50/);
 
-  await accountSelect.selectOption("acc_pending");
+  await accountInput.fill("pending@icloud.com.cn");
+  await accountInput.press("Enter");
   await expect(page).toHaveURL(
     /\/accounts\/acc_pending\/inbox\?mock=success&source=workspace&days=3&limit=50$/,
   );
-  await expect(accountSelect).toHaveValue("acc_pending");
-  await expect(aliasSelect).toHaveValue("");
+  await expect(accountInput).toHaveValue("pending@icloud.com.cn");
+  await expect(aliasInput).toHaveValue("");
   await expect(daysSelect).toHaveValue("3");
   await expect(limitSelect).toHaveValue("50");
 
@@ -207,6 +235,116 @@ test("inbox displays the Web API fallback reported by the service", async ({ pag
   await expect(page.getByLabel("实际读取方式：Web API")).toBeVisible();
   await expect(page.getByLabel("实际读取方式：IMAP")).toHaveCount(0);
   await expect(page.getByRole("list", { name: "邮件摘要列表" })).toBeVisible();
+});
+
+test("inbox appends cursor pages without horizontal overflow", async ({ page }) => {
+  await page.goto("/accounts/acc_primary/inbox?mock=inbox-paged");
+  await waitForMockWorker(page, "收件箱");
+
+  const messageList = page.getByRole("list", { name: "邮件摘要列表" });
+  await expect(messageList).toContainText("登录确认");
+  await expect(messageList).toContainText("新设备登录提醒");
+  const nextPageRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/inbox" && url.searchParams.get("before_uid") === "1040";
+  });
+  await page.getByRole("button", { name: "加载更多邮件" }).click();
+  await nextPageRequest;
+
+  await expect(messageList).toContainText("问题状态已更新");
+  await expect(page.getByRole("button", { name: "加载更多邮件" })).toHaveCount(0);
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const dimensions = await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }));
+    expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+    await expect(messageList).toBeVisible();
+  }
+});
+
+test("inbox keeps excess messages inside a fixed scrolling pane", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/accounts/acc_primary/inbox?mock=inbox-scroll");
+  await waitForMockWorker(page, "收件箱");
+
+  const messagePanel = page.locator(".inbox-message-panel");
+  const messageList = page.locator(".inbox-message-list");
+  const previewPanel = page.locator(".inbox-preview-panel");
+  const sidebar = page.locator(".sidebar");
+  await expect(messagePanel).toBeVisible();
+  await expect(messagePanel).toContainText("滚动列表邮件 12");
+  await expect(previewPanel).toBeVisible();
+  const scrollMetrics = await messageList.evaluate((element) => {
+    const firstRow = element.querySelector<HTMLElement>("li");
+    return {
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      rowHeight: firstRow?.getBoundingClientRect().height ?? 0,
+      scrollHeight: element.scrollHeight,
+    };
+  });
+  expect(scrollMetrics.rowHeight).toBeGreaterThan(0);
+  expect(scrollMetrics.clientHeight).toBe(scrollMetrics.rowHeight * 10);
+  expect(scrollMetrics.overflowY).toBe("auto");
+  expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+
+  const previewMetrics = await page.evaluate(() => {
+    const message = document.querySelector<HTMLElement>(".inbox-message-panel");
+    const panel = document.querySelector<HTMLElement>(".inbox-preview-panel");
+    const copy = panel?.querySelector<HTMLElement>(".inbox-preview-copy");
+    const body = copy?.querySelector<HTMLElement>("p");
+    const panelRect = panel?.getBoundingClientRect();
+    const copyRect = copy?.getBoundingClientRect();
+    return {
+      copyHeight: copy?.clientHeight ?? 0,
+      panelBottomGap: panelRect && copyRect ? panelRect.bottom - copyRect.bottom : Number.NaN,
+      panelHeight: panel?.getBoundingClientRect().height ?? 0,
+      messagePanelHeight: message?.getBoundingClientRect().height ?? 0,
+      previewBodyHeight: body?.clientHeight ?? 0,
+      previewBodyMaxHeight: body ? getComputedStyle(body).maxHeight : "",
+    };
+  });
+  expect(
+    Math.abs(previewMetrics.panelHeight - previewMetrics.messagePanelHeight),
+  ).toBeLessThanOrEqual(1);
+  expect(previewMetrics.panelBottomGap).toBeLessThanOrEqual(24);
+  expect(previewMetrics.copyHeight).toBeGreaterThan(320);
+  expect(previewMetrics.previewBodyHeight).toBeGreaterThan(320);
+  expect(previewMetrics.previewBodyMaxHeight).toBe("none");
+
+  const scrolled = await messageList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return element.scrollTop > 0;
+  });
+  expect(scrolled).toBe(true);
+
+  const sidebarBeforeScroll = await sidebar.evaluate((element) => ({
+    position: getComputedStyle(element).position,
+    top: element.getBoundingClientRect().top,
+  }));
+  expect(sidebarBeforeScroll.position).toBe("sticky");
+  expect(Math.abs(sidebarBeforeScroll.top)).toBeLessThanOrEqual(1);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await page.waitForFunction(() => window.scrollY > 0);
+  const sidebarTopAfterScroll = await sidebar.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  expect(Math.abs(sidebarTopAfterScroll)).toBeLessThanOrEqual(1);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(sidebar).toHaveCSS("position", "static");
+  await expect(messageList).toBeVisible();
+  const dimensions = await page.evaluate(() => ({
+    documentWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
 });
 
 test("inbox long content fits each responsive layout without horizontal overflow", async ({
@@ -685,7 +823,7 @@ test("App Password validation updates capability without leaving the password", 
   const emailInput = passwordSection.getByLabel("iCloud 邮箱");
   const passwordInput = passwordSection.getByLabel("App 专用密码", { exact: true });
 
-  await expect(passwordSection.getByText("未配置")).toBeVisible();
+  await expect(passwordSection.getByText("未配置", { exact: true })).toBeVisible();
   await expect(emailInput).toHaveValue("pending@icloud.com.cn");
   await expect(passwordInput).toHaveAttribute("type", "password");
   await passwordSection.getByRole("button", { name: "验证并保存" }).click();
@@ -695,7 +833,7 @@ test("App Password validation updates capability without leaving the password", 
   await passwordSection.getByRole("button", { name: "验证并保存" }).click();
 
   await expect(passwordInput).toHaveValue("");
-  await expect(passwordSection.getByText("已配置")).toBeVisible();
+  await expect(passwordSection.getByText("已配置", { exact: true })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("App 密码已验证");
   await expect(page.locator("body")).not.toContainText("abcd-efgh-ijkl-mnop");
   expect(page.url()).not.toContain("abcd-efgh-ijkl-mnop");
@@ -858,7 +996,7 @@ test("credential workflows leave no browser-persistent residue or console disclo
   await appPasswordInput.fill(secrets.appPassword);
   await appPasswordSection.getByRole("button", { name: "验证并保存" }).click();
   await expect(appPasswordInput).toHaveValue("");
-  await expect(appPasswordSection.getByText("已配置")).toBeVisible();
+  await expect(appPasswordSection.getByText("已配置", { exact: true })).toBeVisible();
 
   const appleLoginSection = page.getByRole("region", { name: "Apple 登录" });
   const applePasswordInput = appleLoginSection.getByLabel("Apple ID 密码", { exact: true });
@@ -953,6 +1091,9 @@ test("settings reports health and reloads configuration", async ({ page }) => {
   await expect(page.getByText("正常")).toBeVisible();
   await expect(page.getByText("可用")).toBeVisible();
   await expect(page.getByText("服务端本地配置")).toBeVisible();
+  const operationLogList = page.getByRole("list", { name: "最近操作记录" });
+  await expect(operationLogList).toContainText("读取收件箱");
+  await expect(page.getByRole("button", { name: "刷新日志" })).toBeVisible();
   const healthList = page.locator(".settings-health-list");
   const configLocation = healthList.locator(".settings-health-item").last();
 
@@ -975,6 +1116,7 @@ test("settings reports health and reloads configuration", async ({ page }) => {
       configLocation.evaluate((element) => element.getBoundingClientRect().width),
     ]);
     expect(widths[1]).toBeGreaterThanOrEqual(widths[0] - 2);
+    await expect(operationLogList).toBeVisible();
     await expect(page.getByRole("button", { name: "重载配置" })).toBeVisible();
   }
 });
@@ -983,10 +1125,15 @@ test("settings keeps health and reload errors recoverable", async ({ page }) => 
   await page.goto("/settings?mock=error");
   await waitForMockWorker(page, "系统设置");
 
-  await expect(page.getByRole("alert")).toContainText("健康检查失败");
+  await expect(page.getByRole("region", { name: "服务健康" }).getByRole("alert")).toContainText(
+    "健康检查失败",
+  );
   await expect(page.getByRole("button", { name: "重新检查" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "操作日志" }).getByRole("alert")).toContainText(
+    "Apple 服务错误",
+  );
   await page.getByRole("button", { name: "重载配置" }).click();
-  await expect(page.getByRole("alert")).toContainText("Apple 服务错误");
+  await expect(page.getByLabel("配置重载").getByRole("alert")).toContainText("Apple 服务错误");
   await expect(page.getByRole("button", { name: "重载配置" })).toBeEnabled();
 });
 
@@ -1104,9 +1251,15 @@ test("alias automation saves rules, creates aliases, and fits responsive baselin
   const enabled = page.getByLabel("启用自动化规则");
   await enabled.check();
   await page.getByLabel("定时创建数量").fill("2");
+  await page.getByLabel("周一").check();
+  await page.getByLabel("开始").fill("09:00");
+  await page.getByLabel("结束").fill("17:00");
   await page.getByRole("button", { name: "保存规则" }).click();
   await expect(page.getByRole("status").filter({ hasText: "自动化规则已保存" })).toBeVisible();
   await expect(enabled).toBeChecked();
+
+  await page.getByRole("button", { name: "预览执行" }).click();
+  await expect(page.getByRole("region", { name: "执行预览" })).toBeVisible();
 
   await page.getByRole("button", { name: "立即执行规则" }).click();
   await expect(page.getByRole("status").filter({ hasText: "自动化规则已执行" })).toContainText(
@@ -1136,6 +1289,8 @@ test("alias automation saves rules, creates aliases, and fits responsive baselin
     expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
     await expect(page.getByRole("heading", { level: 3, name: "别名自动化" })).toBeVisible();
     await expect(page.getByLabel("执行间隔（分钟）")).toBeVisible();
+    await expect(page.getByLabel("周一")).toBeVisible();
+    await expect(page.getByLabel("开始")).toBeVisible();
     await expect(page.getByRole("button", { name: "批量创建" })).toBeVisible();
   }
 });

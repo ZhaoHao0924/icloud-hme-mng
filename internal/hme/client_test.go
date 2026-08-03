@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewClientCopiesCookies(t *testing.T) {
@@ -31,6 +32,40 @@ func TestParseAliasListReturnsEmptySliceForNoAliases(t *testing.T) {
 	}
 	if len(aliases) != 0 {
 		t.Fatalf("parseAliasList() length = %d, want 0", len(aliases))
+	}
+}
+
+func TestParseAliasListSortsByCreatedAtNewestFirst(t *testing.T) {
+	aliases := parseAliasList(`{"result":{"hmeEmails":[
+		{"hme":"older@icloud.com","anonymousId":"older","createdAt":"2026-07-30T10:00:00Z"},
+		{"hme":"newer@icloud.com","anonymousId":"newer","createdAt":"2026-08-01T10:00:00Z"},
+		{"hme":"unknown@icloud.com","anonymousId":"unknown","createdAt":""}
+	]}}`)
+
+	if len(aliases) != 3 {
+		t.Fatalf("parseAliasList() length = %d, want 3", len(aliases))
+	}
+	got := []string{aliases[0].AnonymousID, aliases[1].AnonymousID, aliases[2].AnonymousID}
+	want := []string{"newer", "older", "unknown"}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Errorf("aliases[%d].AnonymousID = %q, want %q", index, got[index], want[index])
+		}
+	}
+}
+
+func TestParseAliasListNormalizesUnixMilliseconds(t *testing.T) {
+	const timestamp int64 = 1754042400000
+	aliases := parseAliasList(`{"result":{"hmeEmails":[
+		{"hme":"numeric@icloud.com","anonymousId":"numeric","createTimestamp":1754042400000}
+	]}}`)
+
+	if len(aliases) != 1 {
+		t.Fatalf("parseAliasList() length = %d, want 1", len(aliases))
+	}
+	want := time.UnixMilli(timestamp).UTC().Format(time.RFC3339)
+	if aliases[0].CreatedAt != want {
+		t.Fatalf("CreatedAt = %q, want %q", aliases[0].CreatedAt, want)
 	}
 }
 

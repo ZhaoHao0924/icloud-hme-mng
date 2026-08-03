@@ -224,6 +224,12 @@ function AppPasswordSection({ account }: { account: Account }) {
         <CredentialCapabilityStatus configured={account.has_app_password} />
       </div>
 
+      <p className="form-submit-notice">
+        {account.has_app_password
+          ? "App 专用密码已配置。收件箱会优先使用 IMAP，支持按具体别名可靠筛选邮件。"
+          : "App 专用密码未配置。收件箱会回退到 Web API；Apple 可能不提供可验证收件人，指定别名筛选可能不可用。"}
+      </p>
+
       <form
         className="credential-form"
         noValidate

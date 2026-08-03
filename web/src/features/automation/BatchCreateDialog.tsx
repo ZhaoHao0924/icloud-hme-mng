@@ -55,6 +55,7 @@ export function BatchCreateDialog({ accountId, defaultLabelPrefix }: BatchCreate
       });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.aliases(accountId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.aliasCreationHistory(accountId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.accounts }),
       ]);
     },

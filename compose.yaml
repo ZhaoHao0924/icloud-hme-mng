@@ -1,0 +1,34 @@
+name: icloud-hme
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${ICLOUD_HME_VERSION:-dev}
+    command: ["-addr", "0.0.0.0:8081", "-data", "/app/data"]
+    environment:
+      ICLOUD_HME_API_TOKEN: ${ICLOUD_HME_API_TOKEN:?Set ICLOUD_HME_API_TOKEN in .env before starting the service}
+      TZ: ${TZ:-Asia/Shanghai}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8081/api/auth/session",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    image: ${ICLOUD_HME_IMAGE:-icloud-hme:local}
+    init: true
+    ports:
+      - "${ICLOUD_HME_BIND_ADDRESS:-127.0.0.1}:${ICLOUD_HME_PORT:-8081}:8081"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: ${ICLOUD_HME_DATA_DIR:-./data}
+        target: /app/data

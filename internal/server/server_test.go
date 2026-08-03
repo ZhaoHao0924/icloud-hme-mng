@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"icloud-hme/internal/account"
+	"icloud-hme/internal/auditlog"
 	"icloud-hme/internal/hme"
+	"icloud-hme/internal/mail"
 	"icloud-hme/internal/webui"
 )
 
@@ -74,6 +76,164 @@ func TestAPITokenMiddlewareDisabled(t *testing.T) {
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
+	}
+}
+
+func TestPlatformAuthSetupLoginAndLogoutProtectBusinessRoutes(t *testing.T) {
+	srv := newPlatformAuthTestServer(t, "")
+
+	blocked := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, "/api/accounts", nil))
+	assertPlatformAuthFailure(t, blocked, platformAuthSetupRequiredCode)
+
+	statusBeforeSetup := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(statusBeforeSetup, httptest.NewRequest(http.MethodGet, "/api/auth/session", nil))
+	if statusBeforeSetup.Code != http.StatusOK {
+		t.Fatalf("session before setup status = %d, body = %s", statusBeforeSetup.Code, statusBeforeSetup.Body.String())
+	}
+	if status := decodePlatformAuthStatus(t, statusBeforeSetup); status.Configured || status.Authenticated {
+		t.Fatalf("status before setup = %+v, want unconfigured and unauthenticated", status)
+	}
+
+	const username = "admin"
+	const password = "correct-horse-battery-staple"
+	setup := httptest.NewRecorder()
+	setupReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/setup",
+		strings.NewReader(`{"username":"`+username+`","password":"`+password+`"}`),
+	)
+	setupReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(setup, setupReq)
+	if setup.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, body = %s", setup.Code, setup.Body.String())
+	}
+	if strings.Contains(setup.Body.String(), password) {
+		t.Fatalf("setup response leaked password: %s", setup.Body.String())
+	}
+	setupStatus := decodePlatformAuthStatus(t, setup)
+	if !setupStatus.Configured || !setupStatus.Authenticated || setupStatus.Username != username {
+		t.Fatalf("setup status = %+v", setupStatus)
+	}
+	setupCookie := requiredPlatformSessionCookie(t, setup)
+	setCookie := setup.Header().Get("Set-Cookie")
+	for _, expected := range []string{"HttpOnly", "SameSite=Strict", "Path=/"} {
+		if !strings.Contains(setCookie, expected) {
+			t.Errorf("Set-Cookie = %q, want %q", setCookie, expected)
+		}
+	}
+
+	authorized := httptest.NewRecorder()
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+	authorizedReq.AddCookie(setupCookie)
+	srv.Handler().ServeHTTP(authorized, authorizedReq)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("session-authenticated accounts status = %d, body = %s", authorized.Code, authorized.Body.String())
+	}
+
+	logout := httptest.NewRecorder()
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutReq.AddCookie(setupCookie)
+	srv.Handler().ServeHTTP(logout, logoutReq)
+	if logout.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, body = %s", logout.Code, logout.Body.String())
+	}
+	if !strings.Contains(logout.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Errorf("logout Set-Cookie = %q, want expiry", logout.Header().Get("Set-Cookie"))
+	}
+
+	revoked := httptest.NewRecorder()
+	revokedReq := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+	revokedReq.AddCookie(setupCookie)
+	srv.Handler().ServeHTTP(revoked, revokedReq)
+	assertPlatformAuthFailure(t, revoked, platformAuthRequiredCode)
+
+	invalidLogin := httptest.NewRecorder()
+	invalidLoginReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/login",
+		strings.NewReader(`{"username":"`+username+`","password":"incorrect-password"}`),
+	)
+	invalidLoginReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(invalidLogin, invalidLoginReq)
+	assertPlatformAuthFailure(t, invalidLogin, platformAuthInvalidCode)
+
+	login := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/login",
+		strings.NewReader(`{"username":"`+username+`","password":"`+password+`"}`),
+	)
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(login, loginReq)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", login.Code, login.Body.String())
+	}
+	if strings.Contains(login.Body.String(), password) {
+		t.Fatalf("login response leaked password: %s", login.Body.String())
+	}
+	if !decodePlatformAuthStatus(t, login).Authenticated {
+		t.Fatalf("login status = %s", login.Body.String())
+	}
+}
+
+func TestPlatformAuthAllowsExistingBearerTokenAndProtectsRemoteSetup(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	srv := newPlatformAuthTestServer(t, token)
+
+	invalidBearerBusinessRequest := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+	invalidBearerBusinessRequest.Header.Set("Authorization", "Bearer invalid-token")
+	invalidBearerBusinessResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(invalidBearerBusinessResponse, invalidBearerBusinessRequest)
+	if invalidBearerBusinessResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer business request status = %d, body = %s", invalidBearerBusinessResponse.Code, invalidBearerBusinessResponse.Body.String())
+	}
+	var invalidBearer apiResp
+	if err := json.Unmarshal(invalidBearerBusinessResponse.Body.Bytes(), &invalidBearer); err != nil {
+		t.Fatalf("decode invalid bearer business response: %v", err)
+	}
+	if invalidBearer.Code != apiTokenInvalidCode {
+		t.Fatalf("invalid bearer business response code = %q, want %q", invalidBearer.Code, apiTokenInvalidCode)
+	}
+
+	setupWithoutToken := httptest.NewRecorder()
+	setupWithoutTokenReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/setup",
+		strings.NewReader(`{"username":"admin","password":"correct-horse-battery-staple"}`),
+	)
+	setupWithoutTokenReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(setupWithoutToken, setupWithoutTokenReq)
+	if setupWithoutToken.Code != http.StatusUnauthorized {
+		t.Fatalf("setup without token status = %d, body = %s", setupWithoutToken.Code, setupWithoutToken.Body.String())
+	}
+	var unauthorized apiResp
+	if err := json.Unmarshal(setupWithoutToken.Body.Bytes(), &unauthorized); err != nil {
+		t.Fatalf("decode setup without token response: %v", err)
+	}
+	if unauthorized.Code != apiTokenInvalidCode {
+		t.Fatalf("setup without token code = %q, want %q", unauthorized.Code, apiTokenInvalidCode)
+	}
+
+	setupWithToken := httptest.NewRecorder()
+	setupWithTokenReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/setup",
+		strings.NewReader(`{"username":"admin","password":"correct-horse-battery-staple"}`),
+	)
+	setupWithTokenReq.Header.Set("Authorization", "Bearer "+token)
+	setupWithTokenReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(setupWithToken, setupWithTokenReq)
+	if setupWithToken.Code != http.StatusOK {
+		t.Fatalf("setup with token status = %d, body = %s", setupWithToken.Code, setupWithToken.Body.String())
+	}
+
+	bearerRequest := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+	bearerRequest.Header.Set("Authorization", "Bearer "+token)
+	bearerResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bearerResponse, bearerRequest)
+	if bearerResponse.Code != http.StatusOK {
+		t.Fatalf("bearer accounts status = %d, body = %s", bearerResponse.Code, bearerResponse.Body.String())
 	}
 }
 
@@ -205,6 +365,7 @@ func TestAPIResponsesDisableBrowserCaching(t *testing.T) {
 		{method: http.MethodPut, path: "/api/accounts/missing/cookies", body: `{}`},
 		{method: http.MethodPost, path: "/api/accounts/missing/login/start", body: `{}`},
 		{method: http.MethodPost, path: "/api/accounts/missing/login/verify", body: `{}`},
+		{method: http.MethodGet, path: "/api/logs"},
 	}
 
 	for _, tt := range tests {
@@ -225,6 +386,157 @@ func TestAPIResponsesDisableBrowserCaching(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want no-store", got)
 			}
 		})
+	}
+}
+
+func TestOperationLogsAreAvailableAndDoNotPersistRequestValues(t *testing.T) {
+	srv := newTestServer(t, "")
+	const accountID = "account-private-value"
+	const alias = "private-alias@example.test"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/inbox?account_id="+accountID+"&alias="+alias,
+		nil,
+	)
+	res := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("inbox status = %d, want %d; body = %s", res.Code, http.StatusBadRequest, res.Body.String())
+	}
+
+	entries, err := srv.operationLogs.List(10)
+	if err != nil {
+		t.Fatalf("list operation logs: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log count = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.Operation != "读取收件箱" || entry.Level != auditlog.LevelWarning || entry.Status != res.Code {
+		t.Errorf("operation log = %+v", entry)
+	}
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/api/logs?limit=10", nil)
+	logsRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(logsRes, logsReq)
+	if logsRes.Code != http.StatusOK {
+		t.Fatalf("logs status = %d, want %d; body = %s", logsRes.Code, http.StatusOK, logsRes.Body.String())
+	}
+	if strings.Contains(logsRes.Body.String(), accountID) || strings.Contains(logsRes.Body.String(), alias) {
+		t.Errorf("logs response contains request value: %s", logsRes.Body.String())
+	}
+	entriesAfterRead, err := srv.operationLogs.List(10)
+	if err != nil {
+		t.Fatalf("list operation logs after read: %v", err)
+	}
+	if len(entriesAfterRead) != len(entries) {
+		t.Errorf("viewing logs recorded another entry: before=%d after=%d", len(entries), len(entriesAfterRead))
+	}
+}
+
+func Test163EmailNotificationAPIStoresOnlyAProtectedAuthorizationCode(t *testing.T) {
+	srv := newTestServer(t, "")
+	get := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/notifications/email", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("initial notification status = %d, body = %s", get.Code, get.Body.String())
+	}
+	if strings.Contains(get.Body.String(), "authorization_code") {
+		t.Fatalf("initial notification response exposed authorization_code: %s", get.Body.String())
+	}
+
+	const authorizationCode = "163-test-authorization-code"
+	update := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(
+		http.MethodPut,
+		"/api/notifications/email",
+		strings.NewReader(`{"enabled":true,"sender_email":"sender@163.com","authorization_code":"`+authorizationCode+`","recipient_email":"recipient@qq.com"}`),
+	)
+	updateReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(update, updateReq)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update notification status = %d, body = %s", update.Code, update.Body.String())
+	}
+	if strings.Contains(update.Body.String(), authorizationCode) || strings.Contains(update.Body.String(), "authorization_code") {
+		t.Fatalf("update response exposed authorization code: %s", update.Body.String())
+	}
+	if !strings.Contains(update.Body.String(), "sender@163.com") {
+		t.Fatalf("update response omitted 163 sender: %s", update.Body.String())
+	}
+
+	invalid := httptest.NewRecorder()
+	invalidReq := httptest.NewRequest(
+		http.MethodPut,
+		"/api/notifications/email",
+		strings.NewReader(`{"enabled":true,"sender_email":"sender@qq.com","authorization_code":"secret","recipient_email":"recipient@qq.com"}`),
+	)
+	invalidReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(invalid, invalidReq)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid notification status = %d, want %d; body = %s", invalid.Code, http.StatusBadRequest, invalid.Body.String())
+	}
+}
+
+func TestWebhookNotificationAPIStoresOnlyRedactedConfiguration(t *testing.T) {
+	srv := newTestServer(t, "")
+	get := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/notifications/webhook", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("initial webhook status = %d, body = %s", get.Code, get.Body.String())
+	}
+	if strings.Contains(get.Body.String(), "secret") {
+		t.Fatalf("initial webhook response exposed secret: %s", get.Body.String())
+	}
+
+	const secret = "webhook-api-secret"
+	update := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(
+		http.MethodPut,
+		"/api/notifications/webhook",
+		strings.NewReader(`{"enabled":true,"url":"https://hooks.example.test/icloud","secret":"`+secret+`"}`),
+	)
+	updateReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(update, updateReq)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update webhook status = %d, body = %s", update.Code, update.Body.String())
+	}
+	if strings.Contains(update.Body.String(), secret) || strings.Contains(update.Body.String(), "secret") {
+		t.Fatalf("update webhook response exposed secret: %s", update.Body.String())
+	}
+
+	invalid := httptest.NewRecorder()
+	invalidReq := httptest.NewRequest(
+		http.MethodPut,
+		"/api/notifications/webhook",
+		strings.NewReader(`{"enabled":true,"url":"http://hooks.example.test/icloud","secret":"secret"}`),
+	)
+	invalidReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(invalid, invalidReq)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid webhook status = %d, want %d; body = %s", invalid.Code, http.StatusBadRequest, invalid.Body.String())
+	}
+}
+
+func TestScheduledAliasAutomationRunIsWrittenToOperationLog(t *testing.T) {
+	srv := newTestServer(t, "")
+	srv.recordScheduledAliasAutomationRun(aliasAutomationScheduledRun{
+		Created:  2,
+		Duration: 125 * time.Millisecond,
+		Failed:   1,
+		Status:   account.AliasAutomationStatusPartial,
+	})
+
+	entries, err := srv.operationLogs.List(10)
+	if err != nil {
+		t.Fatalf("list operation logs: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log count = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.Operation != "定时执行别名自动化" || entry.Level != auditlog.LevelWarning || entry.Status != http.StatusPartialContent || entry.DurationMS != 125 {
+		t.Errorf("scheduled automation log = %+v", entry)
 	}
 }
 
@@ -431,6 +743,8 @@ func TestInboxQueryBounds(t *testing.T) {
 		{name: "days below minimum", query: "days=0", parameter: "days"},
 		{name: "days above maximum", query: "days=366", parameter: "days"},
 		{name: "days not integer", query: "days=many", parameter: "days"},
+		{name: "cursor zero", query: "before_uid=0", parameter: "before_uid"},
+		{name: "cursor not integer", query: "before_uid=older", parameter: "before_uid"},
 	}
 
 	for _, tt := range tests {
@@ -448,6 +762,210 @@ func TestInboxQueryBounds(t *testing.T) {
 				t.Errorf("response does not report %s boundary: %s", tt.parameter, res.Body.String())
 			}
 		})
+	}
+}
+
+func TestInboxListReturnsIMAPCursor(t *testing.T) {
+	srv := newTestServer(t, "")
+	client := &fakeInboxIMAPClient{
+		listSummaries:              []mail.Message{{ID: "1042", Subject: "newest"}, {ID: "1041", Subject: "older"}},
+		listSummariesNextBeforeUID: 1041,
+	}
+	srv.newInboxIMAPClient = func(accountID string) (inboxIMAPClient, error) {
+		if accountID != "acc_main" {
+			t.Errorf("account ID = %q, want acc_main", accountID)
+		}
+		return client, nil
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/inbox?account_id=acc_main&include_preview=false&before_uid=1043",
+		nil,
+	)
+	res := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
+	}
+	if client.lastListSummariesBeforeUID != 1043 {
+		t.Errorf("received cursor = %d, want 1043", client.lastListSummariesBeforeUID)
+	}
+	var body struct {
+		Data struct {
+			Count      int    `json:"count"`
+			HasMore    bool   `json:"has_more"`
+			Method     string `json:"method"`
+			NextCursor string `json:"next_cursor"`
+		} `json:"data"`
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Success || body.Data.Count != 2 || !body.Data.HasMore || body.Data.NextCursor != "1041" {
+		t.Errorf("page response = %+v", body)
+	}
+	if body.Data.Method != "imap" {
+		t.Errorf("method = %q, want imap", body.Data.Method)
+	}
+}
+
+func TestInboxRejectsInvalidPreviewModes(t *testing.T) {
+	for _, parameter := range []string{"include_preview", "first_preview"} {
+		t.Run(parameter, func(t *testing.T) {
+			srv := newTestServer(t, "")
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/inbox?account_id=missing&"+parameter+"=maybe",
+				nil,
+			)
+			res := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusBadRequest, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), parameter) {
+				t.Errorf("response does not report invalid %s mode: %s", parameter, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestInboxMessageValidatesAccountAndUID(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "missing account", target: "/api/inbox/messages/7", want: "account_id"},
+		{name: "invalid UID", target: "/api/inbox/messages/not-a-uid?account_id=missing", want: "UID"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t, "")
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			res := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusBadRequest, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), tt.want) {
+				t.Errorf("response = %s, want %q", res.Body.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadFirstInboxPreviewFetchesOnceAndCaches(t *testing.T) {
+	srv := newTestServer(t, "")
+	messages := []mail.Message{{ID: "7", Subject: "summary"}}
+	loader := &stubInboxPreviewLoader{message: &mail.Message{
+		ID:      "7",
+		Subject: "summary",
+		Preview: "selected message body",
+	}}
+
+	srv.loadFirstInboxPreview("acc_main", messages, loader)
+
+	if loader.calls != 1 || loader.lastUID != 7 {
+		t.Fatalf("preview loader = %d calls for UID %d, want one call for UID 7", loader.calls, loader.lastUID)
+	}
+	if messages[0].Preview != "selected message body" {
+		t.Errorf("first preview = %q", messages[0].Preview)
+	}
+	if cached, found := srv.inboxPreviews.Get("acc_main", "7"); !found || cached.Preview != "selected message body" {
+		t.Errorf("cached preview = (%+v, %v)", cached, found)
+	}
+
+	messages[0].Preview = ""
+	srv.loadFirstInboxPreview("acc_main", messages, loader)
+	if loader.calls != 1 {
+		t.Fatalf("cached preview made %d loader calls, want 1", loader.calls)
+	}
+	if messages[0].Preview != "selected message body" {
+		t.Errorf("cached first preview = %q", messages[0].Preview)
+	}
+}
+
+func TestLoadFirstInboxPreviewFailureKeepsSummary(t *testing.T) {
+	srv := newTestServer(t, "")
+	messages := []mail.Message{{ID: "7", Subject: "summary"}}
+	loader := &stubInboxPreviewLoader{err: errors.New("preview unavailable")}
+
+	srv.loadFirstInboxPreview("acc_main", messages, loader)
+
+	if messages[0].Subject != "summary" || messages[0].Preview != "" {
+		t.Errorf("summary changed after preview failure: %+v", messages[0])
+	}
+	if _, found := srv.inboxPreviews.Get("acc_main", "7"); found {
+		t.Fatal("failed preview was cached")
+	}
+}
+
+func TestInboxMessageReturnsCachedPreviewWithoutAccountLookup(t *testing.T) {
+	srv := newTestServer(t, "")
+	srv.inboxPreviews.Set("acc_cached", mail.Message{ID: "7", Preview: "cached body"})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/inbox/messages/007?account_id=acc_cached",
+		nil,
+	)
+	res := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "cached body") {
+		t.Errorf("response does not contain cached preview: %s", res.Body.String())
+	}
+}
+
+func TestInboxListReusesAccountIMAPSession(t *testing.T) {
+	srv := newTestServer(t, "")
+	client := &fakeInboxIMAPClient{
+		listSummaries: []mail.Message{{ID: "7", Subject: "summary"}},
+	}
+	factoryCalls := 0
+	srv.newInboxIMAPClient = func(accountID string) (inboxIMAPClient, error) {
+		if accountID != "acc_main" {
+			t.Errorf("account ID = %q, want acc_main", accountID)
+		}
+		factoryCalls++
+		return client, nil
+	}
+
+	for range 2 {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/api/inbox?account_id=acc_main&include_preview=false&first_preview=false",
+			nil,
+		)
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
+		}
+	}
+
+	if factoryCalls != 1 || client.connectCalls != 1 || client.listSummariesCalls != 2 {
+		t.Fatalf(
+			"factory calls = %d, connect calls = %d, list calls = %d; want 1, 1, 2",
+			factoryCalls,
+			client.connectCalls,
+			client.listSummariesCalls,
+		)
+	}
+	srv.Close()
+	if client.disconnectCalls != 1 {
+		t.Fatalf("disconnect calls = %d, want 1 on server close", client.disconnectCalls)
 	}
 }
 
@@ -919,5 +1437,74 @@ func newTestServer(t *testing.T, token string) *Server {
 	if err != nil {
 		t.Fatalf("create account manager: %v", err)
 	}
-	return New(mgr, false, token)
+	srv := New(mgr, false, token)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func newPlatformAuthTestServer(t *testing.T, token string) *Server {
+	t.Helper()
+	mgr, err := account.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create account manager: %v", err)
+	}
+	srv, err := NewWithPlatformAuth(mgr, false, token, "test")
+	if err != nil {
+		t.Fatalf("create platform auth server: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func assertPlatformAuthFailure(t *testing.T, res *httptest.ResponseRecorder, wantCode string) {
+	t.Helper()
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusUnauthorized, res.Body.String())
+	}
+	var body apiResp
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode platform auth response: %v", err)
+	}
+	if body.Success || body.Code != wantCode || body.Message == "" {
+		t.Fatalf("platform auth response = %+v, want code %q", body, wantCode)
+	}
+}
+
+func decodePlatformAuthStatus(t *testing.T, res *httptest.ResponseRecorder) platformAuthStatus {
+	t.Helper()
+	var body struct {
+		Data    platformAuthStatus `json:"data"`
+		Success bool               `json:"success"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode platform auth status: %v", err)
+	}
+	if !body.Success {
+		t.Fatalf("platform auth status success = false: %s", res.Body.String())
+	}
+	return body.Data
+}
+
+func requiredPlatformSessionCookie(t *testing.T, res *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range res.Result().Cookies() {
+		if cookie.Name == platformSessionCookieName {
+			return cookie
+		}
+	}
+	t.Fatalf("response has no %q cookie: %v", platformSessionCookieName, res.Header().Values("Set-Cookie"))
+	return nil
+}
+
+type stubInboxPreviewLoader struct {
+	calls   int
+	err     error
+	lastUID uint32
+	message *mail.Message
+}
+
+func (s *stubInboxPreviewLoader) GetPreview(uid uint32) (*mail.Message, error) {
+	s.calls++
+	s.lastUID = uid
+	return s.message, s.err
 }

@@ -2,71 +2,84 @@ import { createBrowserRouter, Navigate, type RouteObject } from "react-router-do
 
 import { App } from "./App";
 import { NotFoundPage } from "./NotFoundPage";
+import { PlatformAuthGate } from "./PlatformAuthGate";
+import { PlatformLoginPage } from "./PlatformLoginPage";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { LoadingState } from "../components/LoadingState";
 
 export const routes: RouteObject[] = [
   {
+    path: "/login",
+    element: <PlatformLoginPage />,
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
     path: "/",
-    element: <App />,
+    element: <PlatformAuthGate />,
     errorElement: <RouteErrorBoundary />,
     hydrateFallbackElement: <LoadingState label="正在加载页面" />,
     children: [
-      { index: true, element: <Navigate replace to="/accounts" /> },
       {
-        path: "accounts",
-        lazy: async () => {
-          const { AccountWorkspace } = await import("../features/accounts/AccountWorkspace");
-          return { Component: AccountWorkspace };
-        },
-      },
-      {
-        path: "accounts/:accountId",
-        lazy: async () => {
-          const { AccountDetailLayout } = await import("../features/accounts/AccountDetailLayout");
-          return { Component: AccountDetailLayout };
-        },
+        element: <App />,
         children: [
-          { index: true, element: <Navigate replace to="aliases" /> },
+          { index: true, element: <Navigate replace to="/accounts" /> },
           {
-            path: "aliases",
+            path: "accounts",
             lazy: async () => {
-              const { AliasesPage } = await import("../features/aliases/AliasesPage");
-              return { Component: AliasesPage };
+              const { AccountWorkspace } = await import("../features/accounts/AccountWorkspace");
+              return { Component: AccountWorkspace };
             },
           },
           {
-            path: "automation",
+            path: "accounts/:accountId",
             lazy: async () => {
-              const { AliasAutomationPage } =
-                await import("../features/automation/AliasAutomationPage");
-              return { Component: AliasAutomationPage };
+              const { AccountDetailLayout } =
+                await import("../features/accounts/AccountDetailLayout");
+              return { Component: AccountDetailLayout };
             },
+            children: [
+              { index: true, element: <Navigate replace to="aliases" /> },
+              {
+                path: "aliases",
+                lazy: async () => {
+                  const { AliasesPage } = await import("../features/aliases/AliasesPage");
+                  return { Component: AliasesPage };
+                },
+              },
+              {
+                path: "automation",
+                lazy: async () => {
+                  const { AliasAutomationPage } =
+                    await import("../features/automation/AliasAutomationPage");
+                  return { Component: AliasAutomationPage };
+                },
+              },
+              {
+                path: "inbox",
+                lazy: async () => {
+                  const { InboxPage } = await import("../features/inbox/InboxPage");
+                  return { Component: InboxPage };
+                },
+              },
+              {
+                path: "security",
+                lazy: async () => {
+                  const { SecurityPage } = await import("../features/security/SecurityPage");
+                  return { Component: SecurityPage };
+                },
+              },
+            ],
           },
           {
-            path: "inbox",
+            path: "settings",
             lazy: async () => {
-              const { InboxPage } = await import("../features/inbox/InboxPage");
-              return { Component: InboxPage };
+              const { SettingsPage } = await import("../features/system/SettingsPage");
+              return { Component: SettingsPage };
             },
           },
-          {
-            path: "security",
-            lazy: async () => {
-              const { SecurityPage } = await import("../features/security/SecurityPage");
-              return { Component: SecurityPage };
-            },
-          },
+          { path: "*", element: <NotFoundPage /> },
         ],
       },
-      {
-        path: "settings",
-        lazy: async () => {
-          const { SettingsPage } = await import("../features/system/SettingsPage");
-          return { Component: SettingsPage };
-        },
-      },
-      { path: "*", element: <NotFoundPage /> },
     ],
   },
 ];

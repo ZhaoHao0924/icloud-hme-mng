@@ -27,6 +27,16 @@ export function ApiTokenProvider({ children }: ApiTokenProviderProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const clearCurrentApiToken = useCallback(() => {
+    clearApiToken();
+    pendingTokenRef.current = undefined;
+    setHasApiToken(false);
+    setIsOpen(false);
+    setSubmitError(null);
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+  }, []);
   const openApiTokenDialog = useCallback(() => {
     setSubmitError(null);
     setIsOpen(true);
@@ -34,10 +44,7 @@ export function ApiTokenProvider({ children }: ApiTokenProviderProps) {
 
   useEffect(() => {
     const requireApiToken = () => {
-      clearApiToken();
-      pendingTokenRef.current = undefined;
-      setHasApiToken(false);
-      setSubmitError(null);
+      clearCurrentApiToken();
       setIsOpen(true);
     };
     const handleError = (error: unknown) => {
@@ -60,7 +67,7 @@ export function ApiTokenProvider({ children }: ApiTokenProviderProps) {
       unsubscribeQueries();
       unsubscribeMutations();
     };
-  }, [queryClient, setHasApiToken, setIsOpen, setSubmitError]);
+  }, [clearCurrentApiToken, queryClient, setIsOpen]);
 
   function handleOpenChange(nextOpen: boolean) {
     if (isSubmitting && !nextOpen) return;
@@ -114,8 +121,8 @@ export function ApiTokenProvider({ children }: ApiTokenProviderProps) {
   }
 
   const contextValue = useMemo(
-    () => ({ hasApiToken, openApiTokenDialog }),
-    [hasApiToken, openApiTokenDialog],
+    () => ({ clearApiToken: clearCurrentApiToken, hasApiToken, openApiTokenDialog }),
+    [clearCurrentApiToken, hasApiToken, openApiTokenDialog],
   );
 
   return (

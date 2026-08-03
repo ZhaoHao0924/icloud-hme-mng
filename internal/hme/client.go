@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -729,24 +730,85 @@ func parseAliasList(body string) []Alias {
 		if item.Get("isActive").Exists() {
 			active = item.Get("isActive").Bool() && active
 		}
+		rawCreatedAt := firstNonEmpty(
+			item.Get("createTimestamp").String(),
+			item.Get("createdAt").String(),
+			item.Get("createDate").String(),
+			item.Get("creationDate").String(),
+			item.Get("created_at").String(),
+			meta.Get("createTimestamp").String(),
+			meta.Get("createdAt").String(),
+		)
 		aliases = append(aliases, Alias{
 			Email:       email,
 			AnonymousID: firstNonEmpty(item.Get("anonymousId").String(), item.Get("id").String()),
 			Label:       firstNonEmpty(item.Get("label").String(), meta.Get("label").String()),
 			Active:      active,
-			CreatedAt:   firstNonEmpty(item.Get("createTimestamp").String(), item.Get("createdAt").String()),
+			CreatedAt:   normalizeAliasCreatedAt(rawCreatedAt),
 		})
 		return true
 	})
 
-	// 活跃的排前面,再按邮箱字母序。
+	SortAliasesByCreatedAt(aliases)
+	return aliases
+}
+
+// SortAliasesByCreatedAt orders aliases newest first and keeps undated aliases
+// after entries with a usable creation time.
+func SortAliasesByCreatedAt(aliases []Alias) {
 	sort.SliceStable(aliases, func(i, j int) bool {
-		if aliases[i].Active != aliases[j].Active {
-			return aliases[i].Active
+		leftTime, leftOK := parseAliasCreatedAt(aliases[i].CreatedAt)
+		rightTime, rightOK := parseAliasCreatedAt(aliases[j].CreatedAt)
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && !leftTime.Equal(rightTime) {
+			return leftTime.After(rightTime)
+		}
+		if aliases[i].AnonymousID != aliases[j].AnonymousID {
+			return aliases[i].AnonymousID < aliases[j].AnonymousID
 		}
 		return aliases[i].Email < aliases[j].Email
 	})
-	return aliases
+}
+
+func parseAliasCreatedAt(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if createdAt, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return createdAt, true
+	}
+
+	timestamp, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	absolute := timestamp
+	if absolute < 0 {
+		absolute = -absolute
+	}
+	switch {
+	case absolute >= 1_000_000_000_000_000_000:
+		return time.Unix(timestamp/1_000_000_000, timestamp%1_000_000_000), true
+	case absolute >= 1_000_000_000_000_000:
+		return time.Unix(timestamp/1_000_000, (timestamp%1_000_000)*1_000), true
+	case absolute >= 1_000_000_000_000:
+		return time.UnixMilli(timestamp), true
+	case absolute >= 1_000_000_000:
+		return time.Unix(timestamp, 0), true
+	default:
+		return time.Time{}, false
+	}
+}
+
+func normalizeAliasCreatedAt(value string) string {
+	createdAt, ok := parseAliasCreatedAt(value)
+	if !ok {
+		return ""
+	}
+	return createdAt.UTC().Format(time.RFC3339)
 }
 
 // findFirstDictArray 递归查找第一个「对象数组」。

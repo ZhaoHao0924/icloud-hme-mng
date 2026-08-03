@@ -51,6 +51,8 @@ docker run -d \
   -addr 0.0.0.0:8081
 ```
 
+推荐使用仓库中的 `compose.yaml` 管理持久化数据、健康检查和自动重启。部署与离线备份/恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
 镜像支持 `linux/amd64` 和 `linux/arm64` 双架构，自动适配。
 
 #### 方式三：源码编译
@@ -128,13 +130,15 @@ export ICLOUD_HME_API_TOKEN="$(openssl rand -hex 32)"
 ./icloud-hme_linux_amd64 -h
 ```
 
-服务默认监听 `127.0.0.1:8081`。非回环地址（例如 `0.0.0.0`、`:8081`）必须设置环境变量 `ICLOUD_HME_API_TOKEN`，否则服务会拒绝启动。设置令牌后，所有 `/api` 请求都需要携带：
+服务默认监听 `127.0.0.1:8081`。非回环地址（例如 `0.0.0.0`、`:8081`）必须设置环境变量 `ICLOUD_HME_API_TOKEN`，否则服务会拒绝启动。设置令牌后，脚本和自动化可继续使用：
 
 ```http
 Authorization: Bearer <ICLOUD_HME_API_TOKEN>
 ```
 
-内置 Web UI 可通过顶栏钥匙按钮输入 API Token。令牌只保留在当前页面内存中，不会写入 URL、浏览器存储或查询缓存；刷新或关闭页面后需要重新输入。服务端会用 `code: "api_token_invalid"` 标记 API Token 拒绝，以区别于 iCloud Cookie 会话失效。
+内置 Web UI 首次访问会要求创建管理员账户，此后必须登录才能进入平台或执行操作。没有默认密码；管理员密码仅以 bcrypt 哈希保存在数据目录的 `platform-auth.json` 中。登录会话是 12 小时的 HttpOnly、SameSite=Strict Cookie，只保存在服务端内存，因此服务重启、会话到期或主动退出后都需要重新登录。
+
+远程部署时，首次创建管理员账户需在登录页同时输入 API Token；之后浏览器使用平台登录会话即可。API Token 仍适用于脚本、自动化以及故障恢复，内置 Web UI 也可通过顶栏钥匙按钮临时输入它。令牌只保留在当前页面内存中，不会写入 URL、浏览器存储或查询缓存；刷新或关闭页面后需要重新输入。服务端会用 `code: "api_token_invalid"` 标记 API Token 拒绝，以区别于 iCloud Cookie 会话失效。
 
 所有 `/api` 请求体最大 1 MiB。收件箱参数 `limit` 范围为 `1..100`，`days` 范围为 `1..365`；创建别名的 `label` 最多 200 个 Unicode 字符。请求体超限返回 `413`，其他边界错误返回 `400`。
 
@@ -152,7 +156,7 @@ Web API 收件箱使用 validate 返回的动态 `mccgateway` 并向该网关附
 GET /api/health
 ```
 
-响应包含服务名、构建版本、`ok`/`degraded` 状态和配置可用性，不返回配置路径、账户或凭据。配置不可用时仍返回 HTTP `200`；启用 API Token 后，该接口同样需要 Bearer Token。完整契约见 [API.md](API.md#健康检查)。
+响应包含服务名、构建版本、`ok`/`degraded` 状态和配置可用性，不返回配置路径、账户或凭据。配置不可用时仍返回 HTTP `200`；该接口需要有效的平台登录会话或 Bearer Token。完整契约见 [API.md](API.md#健康检查)。
 
 ### 核心接口
 
@@ -493,11 +497,16 @@ DELETE /api/aliases/:id
 - 一次批量创建 `1..20` 个别名
 - 按固定间隔定时创建指定数量
 - 当活跃别名低于库存阈值时自动补充到目标数量
-- 查看最近一次执行结果、下次执行时间与错误摘要，并可立即执行已保存的规则
+- 设置累计创建目标；达到目标后自动停用，最后一轮只创建剩余数量
+- 设置每日自动创建上限；达到额度后保留规则并在次日继续
+- 限制定时调度的执行日和时间窗，并在不允许的时段自动延后到下一个允许时间
+- 设置总别名安全上限和连续失败上限；达到安全上限或连续失败阈值会自动暂停
+- 显式暂停或恢复规则，查看累计/每日创建进度、最近一次执行结果、下次执行时间、连续失败计数、暂停原因与错误摘要，并可预览或立即执行已保存的规则
+- 查看可追溯的创建批次历史，并导出 CSV
 
-规则按账户保存在 `accounts.json` 的 `alias_automation` 字段中。服务运行时每分钟检查到期规则，服务重启后会继续使用已保存的执行状态。单账户的手动创建、批量创建和自动化创建会串行执行，避免并发操作覆盖刷新后的 Cookie。
+规则按账户保存在 `accounts.json` 的 `alias_automation` 字段中。服务运行时每分钟检查到期规则，服务重启后会继续使用已保存的执行状态。执行日和时间窗按部署服务器时区解释，且只约束定时调度；立即执行仍受总量、每日额度和暂停状态保护。单账户的手动创建、批量创建和自动化创建会串行执行，避免并发操作覆盖刷新后的 Cookie。连续失败按指数退避安排下次尝试，最长 7 天。手动暂停不会改变创建进度；恢复会重新启用规则并清零连续失败计数。修改累计创建目标会开始新的累计周期，界面会要求确认。每日自动创建上限只作用于自动化运行（含“立即执行规则”），到达后将在服务所在时区的次日零点之后的下一个允许时间继续，不会永久停用规则。预览执行只读取别名清单，不会创建别名、保存 Cookie 或写入规则和历史。每次定时运行会写入系统设置中的操作日志，日志仅保存最近 7 天，且不含账户、别名或凭据数据。
 
-批量接口为 `POST /api/accounts/:id/aliases/batch`，规则接口为 `GET`/`PUT /api/accounts/:id/alias-automation`，立即执行接口为 `POST /api/accounts/:id/alias-automation/run`。完整字段和响应契约见 [API.md](API.md#13-批量创建别名)。
+批量接口为 `POST /api/accounts/:id/aliases/batch`，规则接口为 `GET`/`PUT /api/accounts/:id/alias-automation`，暂停/恢复接口为 `POST /api/accounts/:id/alias-automation/pause` 和 `POST /api/accounts/:id/alias-automation/resume`，预览接口为 `POST /api/accounts/:id/alias-automation/preview`，立即执行接口为 `POST /api/accounts/:id/alias-automation/run`。创建历史可通过 `GET /api/accounts/:id/alias-creation-history` 查询，并通过 `GET /api/accounts/:id/alias-creation-history.csv` 导出。完整字段和响应契约见 [API.md](API.md#13-批量创建别名)。
 
 ## 认证方式
 
@@ -647,6 +656,8 @@ npm run test:e2e
 
 `./build.sh`、`./build.ps1` 和 Docker 构建都会先执行前端生产构建，再将 `web/dist` 嵌入 Go 二进制；发布构建无需在运行环境保留 Node 或前端文件。Windows 可运行 `./scripts/windows-release-smoke.ps1 -SkipNpmCi`，以临时原生二进制验证嵌入资源、回环鉴权、SPA 回退、缓存与安全头及重启持久化；该检查不替代 Linux CI、Docker 或受控真实 iCloud 验收。Docker 和真实 iCloud 账户的发布验收步骤见 [RELEASE_SMOKE_CHECKLIST.md](RELEASE_SMOKE_CHECKLIST.md)。
 
+生产部署默认使用 [compose.yaml](compose.yaml)：它将数据目录绑定挂载到 `/app/data`、要求 API Token、默认仅绑定本机端口并启用容器健康检查与自动重启。备份必须在服务停止后执行，备份 ZIP 通过 SHA-256 清单验证；恢复会保留原数据目录作为回滚副本。完整命令见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
 ### 发布
 
 推送 `v*` tag 到 GitHub 自动触发 CI：
@@ -737,6 +748,8 @@ VERSION=v0.2.0 ./build.sh
 ./scripts/windows-release-smoke.ps1 -Version v0.2.0
 ```
 
+For Compose deployment, persistent-data backup, archive verification, and rollback-aware restore instructions, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 For frontend scaffolding:
 
 ```bash
@@ -761,7 +774,7 @@ Create `data/accounts.json` using the canonical array schema in `accounts.json.t
 
 API request bodies are limited to 1 MiB. Inbox `limit` accepts 1 through 100, `days` accepts 1 through 365, alias labels accept up to 200 Unicode characters, batch creation accepts 1 through 20 aliases, and each account accepts up to 128 cookies.
 
-The account Automation tab configures interval-based creation and threshold replenishment. Rules are persisted in `accounts.json`, checked each minute while the service is running, and retain their last/next run state across restarts. Alias operations for each account are serialized so concurrent manual and automated work cannot overwrite refreshed cookies. See [API.md](API.md#13-批量创建别名) for the request and response contracts.
+The account Automation tab configures interval-based creation, threshold replenishment, cumulative targets, daily creation limits, permitted weekdays, and an execution window. Rules are persisted in `accounts.json`, checked each minute while the service is running, and retain their last/next run state across restarts. Weekdays and the execution window use the deployment server time zone and apply only to scheduled runs; a manual run still obeys the cumulative, daily, total-limit, and pause safeguards. The daily limit applies only to automation work, defers additional work to the next permitted time after local midnight, and does not permanently disable the rule. Rules can be paused and resumed explicitly without discarding progress; changing a cumulative target begins a new progress cycle. A read-only preview reports current capacity without creating aliases, saving cookies, or writing rule/history state. Alias operations for each account are serialized so concurrent manual and automated work cannot overwrite refreshed cookies. The tab also exposes account-scoped creation history with stable batch IDs and CSV export. See [API.md](API.md#13-批量创建别名) for the request and response contracts.
 
 IMAP inbox queries apply `days` during the server-side search and return messages newest first. Preview fetches use `BODY.PEEK`, read at most the first 64 KiB of each raw message, and return at most 4 KiB of valid UTF-8 without marking messages as read.
 
@@ -769,8 +782,12 @@ Web inbox queries attach account cookies to the validated dynamic `mccgateway`, 
 
 Configuration updates use a synced temporary file and atomic replacement. A persistence failure rolls back the related in-memory change and returns HTTP 500 without replacing the existing configuration with partial content.
 
-The server listens on `127.0.0.1:8081` by default. Non-loopback listeners require an `ICLOUD_HME_API_TOKEN` of at least 32 characters, and API requests must send it as a Bearer token.
+The server listens on `127.0.0.1:8081` by default. Non-loopback listeners require an `ICLOUD_HME_API_TOKEN` of at least 32 characters. The Bearer token remains available for scripts, automation, and the initial remote administrator setup.
 
-In the embedded Web UI, use the key button in the top bar to enter the API token. The token stays only in current-page memory: it is never written to the URL, browser storage, or query cache, and must be entered again after a refresh or page close. API token rejection is identified by `code: "api_token_invalid"`, separately from an expired iCloud Cookie session.
+Webhook notifications are configured separately in System Settings. The destination must use HTTPS. Payloads contain only redacted automation and session summaries and are signed with HMAC-SHA256; the signing secret is stored in `webhook-notification.json` with protected permissions and is never returned by the API. `GET`/`PUT /api/notifications/webhook` manage the redacted configuration, and `POST /api/notifications/webhook/test` sends a signed test event. Webhook delivery has its own bounded queue and up to three attempts, so endpoint failures cannot block alias work.
 
-`GET /api/health` returns the service name, build version, `ok`/`degraded` status, and configuration availability without exposing paths, accounts, credentials, or internal errors. It is protected by the same Bearer token policy as every other `/api` route.
+The embedded Web UI requires a local administrator setup on first use and a platform login afterwards. The password is stored only as a bcrypt hash in the data directory. Successful login establishes a 12-hour HttpOnly, SameSite=Strict server-side session; restart, expiry, and logout require a new login. Remote initial setup also needs the API token. Use the key button in the top bar only when a temporary Bearer token is needed. The token stays only in current-page memory: it is never written to the URL, browser storage, or query cache, and must be entered again after a refresh or page close. API token rejection is identified by `code: "api_token_invalid"`, separately from platform-login and expired iCloud Cookie errors.
+
+`GET /api/health` returns the service name, build version, `ok`/`degraded` status, and configuration availability without exposing paths, accounts, credentials, or internal errors. It requires a valid platform session or Bearer token, like every business API route.
+
+163 Mail is the only outbound email integration. Configure a `@163.com` sender address, a QQ recipient address (`@qq.com`, `@vip.qq.com`, or `@foxmail.com`), and a 163 Mail authorization code in System Settings. The service uses fixed implicit-TLS SMTP at `smtp.163.com:465`; the authorization code is not the 163 login password. It is stored in `email-notification.json` with protected permissions and is never returned by the API, operation logs, or notification content. `GET`/`PUT /api/notifications/email` manage the redacted configuration, and `POST /api/notifications/email/test` sends a saved-configuration test message. Automation and iCloud-session events use a bounded asynchronous queue with up to three delivery attempts, so mail delivery cannot block alias work.

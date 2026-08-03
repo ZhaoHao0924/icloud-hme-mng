@@ -67,8 +67,13 @@ func main() {
 	count := len(mgr.ListAccounts())
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
 
-	srv := server.NewWithVersion(mgr, *debug, apiToken, version)
+	srv, err := server.NewWithPlatformAuth(mgr, *debug, apiToken, version)
+	if err != nil {
+		log.Fatalf("初始化平台登录认证失败: %v", err)
+	}
+	defer srv.Close()
 
+	log.Printf("平台登录认证已启用")
 	log.Printf("HTTP 服务就绪 addr=%s", *addr)
 	if err := srv.Run(*addr); err != nil {
 		log.Fatalf("服务启动失败: %v", err)

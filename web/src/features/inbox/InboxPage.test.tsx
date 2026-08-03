@@ -1,5 +1,5 @@
 import { HttpResponse, http } from "msw";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { describe, expect, it } from "vitest";
@@ -43,14 +43,19 @@ describe("InboxPage", () => {
     const user = userEvent.setup();
     const { router } = renderInbox("/accounts/acc_primary/inbox?source=workspace");
 
-    const aliasSelect = await screen.findByLabelText("别名");
-    expect(screen.getByLabelText("账户")).toHaveValue("acc_primary");
-    expect(aliasSelect).toHaveValue("");
+    const aliasInput = await screen.findByLabelText("别名");
+    expect(screen.getByLabelText("账户")).toHaveValue("primary@icloud.com");
+    expect(aliasInput).toHaveValue("");
     expect(screen.getByLabelText("时间范围")).toHaveValue("7");
     expect(screen.getByLabelText("数量")).toHaveValue("20");
-    expect(
-      await screen.findByRole("option", { name: "quiet-orchid@icloud.com · GitHub" }),
-    ).toBeInTheDocument();
+    expect(aliasInput).toHaveAttribute("list", "inbox-alias-options");
+    await waitFor(() =>
+      expect(
+        document.querySelector(
+          'datalist#inbox-alias-options option[value="quiet-orchid@icloud.com"]',
+        ),
+      ).not.toBeNull(),
+    );
     expect(screen.getByText("3 封邮件")).toBeInTheDocument();
     expect(screen.getByLabelText("实际读取方式：IMAP")).toBeInTheDocument();
     expect(requests.at(-1)?.searchParams.get("account_id")).toBe("acc_primary");
@@ -58,12 +63,13 @@ describe("InboxPage", () => {
     expect(requests.at(-1)?.searchParams.get("days")).toBe("7");
     expect(requests.at(-1)?.searchParams.get("limit")).toBe("20");
 
-    await user.selectOptions(aliasSelect, "quiet-orchid@icloud.com");
+    await user.clear(aliasInput);
+    await user.type(aliasInput, "quiet-orchid@icloud.com{Enter}");
 
     await waitFor(() =>
       expect(requests.at(-1)?.searchParams.get("alias")).toBe("quiet-orchid@icloud.com"),
     );
-    expect(aliasSelect).toHaveValue("quiet-orchid@icloud.com");
+    expect(aliasInput).toHaveValue("quiet-orchid@icloud.com");
     expect(new URLSearchParams(router.state.location.search).get("alias")).toBe(
       "quiet-orchid@icloud.com",
     );
@@ -94,6 +100,173 @@ describe("InboxPage", () => {
     expect(router.state.location.search).toBe("?source=workspace&alias=quiet-orchid%40icloud.com");
   });
 
+  it("loads IMAP message bodies on demand and reuses cached previews", async () => {
+    const listRequests: URL[] = [];
+    const detailRequests: string[] = [];
+    server.use(
+      http.get("*/api/inbox", ({ request }) => {
+        const url = new URL(request.url);
+        listRequests.push(url);
+        return HttpResponse.json({
+          data: {
+            account_id: "acc_primary",
+            alias: "",
+            count: inboxMessageFixtures.length,
+            messages: inboxMessageFixtures.map((message) => ({ ...message, preview: "" })),
+            method: "imap",
+          },
+          success: true,
+        });
+      }),
+      http.get("*/api/inbox/messages/:messageId", ({ params }) => {
+        const messageId = String(params.messageId);
+        detailRequests.push(messageId);
+        const message = inboxMessageFixtures.find((candidate) => candidate.id === messageId);
+        return HttpResponse.json({ data: message, success: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderInbox();
+
+    const firstPreview = await screen.findByRole("region", { name: "登录确认" });
+    await waitFor(() => expect(firstPreview).toHaveTextContent("请确认你的登录操作。"));
+    expect(listRequests.at(-1)?.searchParams.get("include_preview")).toBe("false");
+    expect(listRequests.at(-1)?.searchParams.get("first_preview")).toBeNull();
+    expect(detailRequests).toEqual(["1042"]);
+
+    await user.click(screen.getByRole("button", { name: "选择邮件 新设备登录提醒" }));
+    const secondPreview = await screen.findByRole("region", { name: "新设备登录提醒" });
+    await waitFor(() => expect(secondPreview).toHaveTextContent("账户安全设置"));
+    expect(detailRequests).toEqual(["1042", "1041"]);
+
+    await user.click(screen.getByRole("button", { name: "选择邮件 登录确认" }));
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "登录确认" })).toHaveTextContent(
+        "请确认你的登录操作。",
+      ),
+    );
+    expect(detailRequests).toEqual(["1042", "1041"]);
+  });
+
+  it("appends an older cursor page without replacing the current list", async () => {
+    const requests: URL[] = [];
+    server.use(
+      http.get("*/api/inbox", ({ request }) => {
+        const url = new URL(request.url);
+        requests.push(url);
+        const beforeUid = url.searchParams.get("before_uid");
+        if (beforeUid === "1040") {
+          return HttpResponse.json({
+            data: {
+              account_id: "acc_primary",
+              alias: "",
+              count: 1,
+              has_more: false,
+              messages: [inboxMessageFixtures[2]],
+              method: "imap",
+              next_cursor: "",
+            },
+            success: true,
+          });
+        }
+        return HttpResponse.json({
+          data: {
+            account_id: "acc_primary",
+            alias: "",
+            count: 2,
+            has_more: true,
+            messages: inboxMessageFixtures.slice(0, 2),
+            method: "imap",
+            next_cursor: "1040",
+          },
+          success: true,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderInbox();
+
+    const list = await screen.findByRole("list", { name: "邮件摘要列表" });
+    expect(list).toHaveTextContent("登录确认");
+    expect(list).toHaveTextContent("新设备登录提醒");
+    await user.click(screen.getByRole("button", { name: "加载更多邮件" }));
+
+    await waitFor(() => expect(requests.at(-1)?.searchParams.get("before_uid")).toBe("1040"));
+    await waitFor(() => expect(list).toHaveTextContent("问题状态已更新"));
+    expect(screen.queryByRole("button", { name: "加载更多邮件" })).not.toBeInTheDocument();
+    expect(screen.getByText("3 封邮件")).toBeInTheDocument();
+  });
+
+  it("uses an IMAP preview returned with the list without a detail request", async () => {
+    let detailRequests = 0;
+    server.use(
+      http.get("*/api/inbox", () =>
+        HttpResponse.json({
+          data: {
+            account_id: "acc_primary",
+            alias: "",
+            count: inboxMessageFixtures.length,
+            messages: inboxMessageFixtures,
+            method: "imap",
+          },
+          success: true,
+        }),
+      ),
+      http.get("*/api/inbox/messages/:messageId", () => {
+        detailRequests += 1;
+        return HttpResponse.json({ data: inboxMessageFixtures[0], success: true });
+      }),
+    );
+
+    renderInbox();
+
+    const preview = await screen.findByRole("region", { name: "登录确认" });
+    await waitFor(() => expect(preview).toHaveTextContent("请确认你的登录操作。"));
+    expect(detailRequests).toBe(0);
+  });
+
+  it("keeps the inbox usable when one on-demand preview times out and retries locally", async () => {
+    let detailShouldFail = true;
+    server.use(
+      http.get("*/api/inbox", () =>
+        HttpResponse.json({
+          data: {
+            account_id: "acc_primary",
+            alias: "",
+            count: inboxMessageFixtures.length,
+            messages: inboxMessageFixtures.map((message) => ({ ...message, preview: "" })),
+            method: "imap",
+          },
+          success: true,
+        }),
+      ),
+      http.get("*/api/inbox/messages/:messageId", ({ params }) => {
+        if (detailShouldFail) {
+          return HttpResponse.json(
+            { message: "读取邮件超时，请稍后重试。", success: false },
+            { status: 504 },
+          );
+        }
+        const message = inboxMessageFixtures.find(
+          (candidate) => candidate.id === String(params.messageId),
+        );
+        return HttpResponse.json({ data: message, success: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderInbox();
+
+    const preview = await screen.findByRole("region", { name: "登录确认" });
+    expect(await within(preview).findByRole("alert")).toHaveTextContent("读取邮件超时");
+    expect(screen.getByRole("list", { name: "邮件摘要列表" })).toBeInTheDocument();
+
+    detailShouldFail = false;
+    await user.click(within(preview).getByRole("button", { name: "重新加载" }));
+
+    await waitFor(() => expect(preview).toHaveTextContent("请确认你的登录操作。"));
+    expect(within(preview).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("shows a dedicated empty state when the current filters have no messages", async () => {
     server.use(
       http.get("*/api/inbox", ({ request }) => {
@@ -119,7 +292,7 @@ describe("InboxPage", () => {
     expect(screen.queryByRole("list", { name: "邮件摘要列表" })).not.toBeInTheDocument();
   });
 
-  it("clears a stale alias filter before requesting the inbox", async () => {
+  it("keeps a manually entered alias even when it is not in the alias list", async () => {
     const requests: URL[] = [];
     server.use(
       http.get("*/api/inbox", ({ request }) => {
@@ -142,13 +315,13 @@ describe("InboxPage", () => {
     );
 
     await screen.findByRole("list", { name: "邮件摘要列表" });
-    await waitFor(() =>
-      expect(new URLSearchParams(router.state.location.search).get("alias")).toBeNull(),
+    expect(new URLSearchParams(router.state.location.search).get("alias")).toBe(
+      "removed-alias@icloud.com",
     );
-    expect(router.state.location.search).toBe("?source=workspace");
-    expect(screen.getByLabelText("别名")).toHaveValue("");
+    expect(router.state.location.search).toBe("?source=workspace&alias=removed-alias%40icloud.com");
+    expect(screen.getByLabelText("别名")).toHaveValue("removed-alias@icloud.com");
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.searchParams.get("alias")).toBe("");
+    expect(requests[0]?.searchParams.get("alias")).toBe("removed-alias@icloud.com");
   });
 
   it("keeps filters visible and retries an inbox fallback error on demand", async () => {
@@ -261,12 +434,13 @@ describe("InboxPage", () => {
       "/accounts/acc_primary/inbox?source=workspace&alias=quiet-orchid%40icloud.com&days=3&limit=50",
     );
 
-    const accountSelect = await screen.findByLabelText("账户");
-    await user.selectOptions(accountSelect, "acc_pending");
+    const accountInput = await screen.findByLabelText("账户");
+    await user.clear(accountInput);
+    await user.type(accountInput, "acc_pending{Enter}");
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/accounts/acc_pending/inbox"));
     expect(router.state.location.search).toBe("?source=workspace&days=3&limit=50");
-    expect(screen.getByLabelText("账户")).toHaveValue("acc_pending");
+    expect(screen.getByLabelText("账户")).toHaveValue("pending@icloud.com.cn");
     expect(screen.getByLabelText("别名")).toHaveValue("");
     expect(screen.getByLabelText("时间范围")).toHaveValue("3");
     expect(screen.getByLabelText("数量")).toHaveValue("50");

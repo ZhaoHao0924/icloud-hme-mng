@@ -44,7 +44,10 @@ export function CreateAliasDialog({ accountId, accountName, onCreated }: CreateA
       reset(defaultValues);
       setOpen(false);
       notify({ message: createdAlias.email, title: "别名已创建", tone: "success" });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.aliases(accountId) });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.aliases(accountId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.aliasCreationHistory(accountId) }),
+      ]);
     },
     retry: false,
   });

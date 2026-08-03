@@ -16,13 +16,15 @@ HTTP JSON API，所有接口返回统一格式：
 
 服务默认只监听 `127.0.0.1:8081`。使用 `0.0.0.0`、`:8081` 或其他非回环地址时，必须设置至少 32 个字符的环境变量 `ICLOUD_HME_API_TOKEN`，否则服务会拒绝启动。
 
-配置令牌后，所有 `/api` 请求都必须携带：
+配置令牌后，脚本和自动化调用可继续通过 Bearer Token 访问所有业务接口：
 
 ```http
 Authorization: Bearer <ICLOUD_HME_API_TOKEN>
 ```
 
-令牌缺失或错误时返回：
+首次初始化管理员账户时也必须携带该 Token。管理员初始化完成后，内置 Web UI 的业务请求可改用平台登录会话，不需要在每次请求中携带 Token；Token 仍可用于脚本、自动化和服务重启后的恢复访问。
+
+Bearer Token 缺失或错误时返回：
 
 ```json
 {
@@ -36,10 +38,38 @@ Authorization: Bearer <ICLOUD_HME_API_TOKEN>
 
 内置 Web UI 可通过页面顶栏的钥匙按钮输入令牌。令牌只保留在当前页面内存中，不写入 URL、Web Storage、Cache Storage、IndexedDB 或查询缓存；刷新或关闭页面后必须重新输入。
 
+### 平台登录
+
+生产服务启动后会启用平台登录认证。首次打开 Web UI 时需要创建管理员账号；没有默认密码。管理员密码仅以 bcrypt 哈希保存在数据目录的 `platform-auth.json` 中，文件权限为 `0600`。浏览器登录成功后，服务签发仅服务端保存的 12 小时 HttpOnly、SameSite=Strict 会话 Cookie；服务重启、会话到期或退出登录都会使该会话失效。
+
+`/api/auth/*` 用于建立或查询平台会话，不要求已有平台会话：
+
+```http
+GET /api/auth/session
+POST /api/auth/setup
+POST /api/auth/login
+POST /api/auth/logout
+```
+
+首次初始化与登录请求体均为：
+
+```json
+{
+  "username": "admin",
+  "password": "至少 12 个字符的管理员密码"
+}
+```
+
+- `GET /api/auth/session` 返回 `authenticated`、`configured`、`username` 和会话过期时间；不会返回密码或 Cookie。
+- `POST /api/auth/setup` 仅能在尚未配置管理员时成功一次。服务配置 `ICLOUD_HME_API_TOKEN` 时，该请求必须携带有效 Bearer Token。
+- `POST /api/auth/login` 验证管理员账号和密码并建立新会话；账号或密码错误时返回 `401` 与 `code: "platform_auth_invalid"`。
+- `POST /api/auth/logout` 会撤销当前浏览器会话并清除 Cookie。
+- 除 `/api/auth/*` 外，所有业务接口要求有效的平台会话或有效 Bearer Token。未初始化返回 `401` 和 `code: "platform_auth_setup_required"`；未登录返回 `401` 和 `code: "platform_auth_required"`。
+
 **错误响应:**
 
 - `400 Bad Request` — 参数错误
-- `401 Unauthorized` — `code: "api_token_invalid"` 表示 API Token 错误；无该 code 的 401/403 可表示 iCloud 会话失效
+- `401 Unauthorized` — `code: "api_token_invalid"` 表示 API Token 错误；`platform_auth_setup_required` 和 `platform_auth_required` 表示需要完成平台初始化或登录；其他无上述 code 的 401/403 可表示 iCloud 会话失效
 - `413 Payload Too Large` — 请求体超过 1 MiB
 - `404 Not Found` — 账号不存在
 - `500 Internal Server Error` — 本地账户配置读取或持久化失败
@@ -110,7 +140,7 @@ Authorization: Bearer <ICLOUD_HME_API_TOKEN>
 GET /api/health
 ```
 
-启用 API Token 时，该请求与其他 `/api` 路由一样必须携带 Bearer Token。鉴权通过且服务能够响应时，接口固定返回 HTTP `200`，并设置 `Cache-Control: no-store`。
+该接口与其他业务接口一样要求有效的平台会话或 Bearer Token。鉴权通过且服务能够响应时，接口固定返回 HTTP `200`，并设置 `Cache-Control: no-store`。
 
 ```json
 {
@@ -538,6 +568,8 @@ GET /api/aliases?account_id=acc_1
 }
 ```
 
+`aliases` 按 `createdAt` 从新到旧返回；缺失或无法解析创建时间的别名排在最后。
+
 **参数说明:**
 
 - `account_id` (必填) — 账号 ID
@@ -701,29 +733,80 @@ Content-Type: application/json
 {
   "enabled": true,
   "interval_minutes": 60,
-  "scheduled_batch_size": 2,
-  "minimum_active": 5,
-  "target_active": 8,
+  "allowed_weekdays": [1, 2, 3, 4, 5],
+  "execution_window_start": "09:00",
+  "execution_window_end": "17:00",
+  "scheduled_batch_size": 0,
+  "minimum_active": 0,
+  "target_active": 0,
   "max_batch_size": 5,
-  "label_prefix": "自动补充"
+  "max_total_aliases": 1000,
+  "max_failure_count": 3,
+  "daily_creation_limit": 20,
+  "target_created": 750,
+  "label_prefix": ""
 }
 ```
 
 字段约束：
 
 - `interval_minutes`: `5..10080`
+- `allowed_weekdays`: 可选的 `0..6` 星期值数组，`0` 为周日；空数组表示每天，元素不可重复
+- `execution_window_start` 与 `execution_window_end`: 可同时为空表示全天；设置时均为 `HH:MM`，开始必须早于结束，不支持跨午夜时间窗
 - `scheduled_batch_size`: `0..max_batch_size`
 - `minimum_active` 与 `target_active`: `0..100`；启用阈值补货时 `target_active` 不得小于 `minimum_active`
 - `max_batch_size`: `1..20`
-- 启用规则时，至少设置一个大于零的 `scheduled_batch_size` 或 `minimum_active`
+- `max_total_aliases`: `1..1000`；自动化创建前读取的总别名安全上限，默认 `1000`
+- `max_failure_count`: `1..10`；连续失败达到该值时自动暂停，默认 `3`
+- `daily_creation_limit`: `0..1000`；每日自动化创建上限，`0` 表示不限制
+- `target_created`: `0..1000`；`0` 表示不设置累计创建上限
+- 启用规则时，至少设置一个大于零的 `scheduled_batch_size`、`minimum_active` 或 `target_created`
 
-每次到期执行时，服务先读取当前活跃别名数：定时创建会请求 `scheduled_batch_size` 个；当活跃数低于 `minimum_active` 时，库存补货会请求补至 `target_active` 的数量。两种规则同时配置时取较大值，再受 `max_batch_size` 限制。
+每次到期执行时，服务先读取当前别名总数和活跃别名数：总数达到 `max_total_aliases` 时不会创建并自动暂停；最后一轮仅剩部分安全容量时会缩小到该容量后暂停。定时创建会请求 `scheduled_batch_size` 个；当活跃数低于 `minimum_active` 时，库存补货会请求补至 `target_active` 的数量。两种规则同时配置时取较大值，再受 `max_batch_size` 限制。配置 `target_created` 后，服务会累计本规则成功创建的别名数（响应中的 `created_total`）；目标型规则未设置定时数量时，每次按 `max_batch_size` 创建，最后一轮会自动缩小到剩余数量。修改 `target_created` 会开始新的累计周期并将 `created_total` 归零。
+
+工作日和时间窗按部署服务器所在时区解释，仅约束定时调度；到期但不在允许范围的规则会将 `next_run_at` 延后到下一个允许时间，避免每分钟重复扫描。`daily_creation_limit` 仅限制自动化执行（包括立即执行规则），不影响单个或批量手动创建。计数按服务所在时区的自然日重置，并在响应中通过 `daily_created` 和 `daily_created_date` 返回。达到每日上限时，规则仍保持启用，`next_run_at` 会延后到次日零点之后的下一个允许时间，不会触发永久暂停。
+
+`success` 会清零 `consecutive_failure`。`partial` 或 `error` 会使其递增，并将下次运行间隔按 `2` 的幂次退避，最大不超过 7 天。连续失败达到 `max_failure_count` 后规则自动暂停。暂停原因 `pause_reason` 可为 `target_reached`、`alias_limit`、`failure_limit` 或 `manual`；暂停时 `enabled` 为 `false`、`next_run_at` 为空。达到累计目标的规则不能恢复，必须先修改 `target_created`。暂停中的规则调用立即执行接口返回 `409`，避免绕过安全暂停。
 
 ```http
 POST /api/accounts/:id/alias-automation/run
 ```
 
 该接口立即按已保存的规则执行一次，并返回 `active_before`、`requested`、`created`、`failed`、`complete`、`status`、新建别名和更新后的 `automation` 状态。`status` 为 `success`、`partial`、`skipped` 或 `error`；执行后会记录 `last_run_at`、`next_run_at`、`last_active`、`last_created` 和脱敏错误摘要。
+
+立即执行不受 `allowed_weekdays` 和执行时间窗限制，但仍会遵守累计创建目标、总别名安全上限、每日上限和暂停状态。
+
+```http
+POST /api/accounts/:id/alias-automation/preview
+```
+
+该接口仅读取当前别名列表，返回本次可创建数量、总数和活跃数、每日余量、总别名余量、累计目标余量，以及当前计划是否处于允许时间。它不会创建别名、保存刷新 Cookie、写入创建历史或修改自动化规则状态。
+
+```http
+POST /api/accounts/:id/alias-automation/pause
+POST /api/accounts/:id/alias-automation/resume
+```
+
+暂停接口不会改变累计创建进度或每日计数，并将 `pause_reason` 设为 `manual`（累计目标已完成时保留 `target_reached`）。恢复接口会清除暂停状态和连续失败计数、重新计算下次执行时间；规则未配置或累计目标已完成时返回 `400`。
+
+### 15. 别名创建历史与 CSV 导出
+
+```http
+GET /api/accounts/:id/alias-creation-history?limit=100
+GET /api/accounts/:id/alias-creation-history.csv
+```
+
+历史接口返回账户最近创建批次，按创建时间倒序；`limit` 范围为 `1..500`，默认 `100`。每条记录包含稳定的 `batch_id`、触发方式（`manual`、`batch`、`automation_manual` 或 `automation_scheduled`）、请求/成功/失败数量、完成状态、脱敏错误摘要及本批创建的别名。单个创建、批量创建和自动化运行的响应也会返回同一个 `batch_id`，可用于追踪来源。
+
+创建历史最多保留每个账户最近 500 个批次，保存在 `accounts.json` 中。CSV 导出不接受分页参数，始终导出当前保留的全部批次；一行对应一个别名，未创建任何别名的批次仍会输出一行统计记录。历史不包含 Cookie、App Password、Apple ID 密码或上游原始响应。
+
+### 16. 操作日志
+
+```http
+GET /api/logs?limit=200
+```
+
+返回最近的隐私安全操作日志，`limit` 范围为 `1..500`，默认 `200`。日志按时间倒序，保存最近 7 天；过期记录会在服务启动、写入和每小时清理时自动删除。每条记录只包含时间、级别、操作名称、HTTP 状态和耗时，不包含账户 ID、邮件地址、Cookie、App Password、请求参数、邮件正文或 Apple 原始响应。定时别名自动化在每次运行状态持久化后也会写入 `定时执行别名自动化` 记录。
 
 ---
 
@@ -883,3 +966,100 @@ for alias in resp.json()["data"]["aliases"]:
 - **创建频率**: iCloud 限制别名创建频率，过快会返回 429
 - **Cookie 有效期**: 约 24 小时，需定期更新
 - **邮件读取**: 依赖 IMAP 连接，超时默认 30 秒
+---
+
+## 163 发件 / QQ 收件通知
+
+通知发送目前只支持通过 163 邮箱发件并投递到 QQ 邮箱，不提供通用 SMTP 或其他邮箱服务商配置。163 发件地址必须是 `@163.com`，QQ 收件地址必须是 `@qq.com`、`@vip.qq.com` 或 `@foxmail.com`，SMTP 固定使用 `smtp.163.com:465` 隐式 TLS。密码字段必须填写 163 邮箱授权码，不是 163 登录密码。
+
+### 读取通知配置
+
+`GET /api/notifications/email`
+
+返回值只包含脱敏配置状态，不返回授权码：
+
+```json
+{
+  "enabled": false,
+  "configured": true,
+  "provider": "163",
+  "smtp_host": "smtp.163.com",
+  "smtp_port": 465,
+  "sender_email": "sender@163.com",
+  "recipient_email": "ops@qq.com"
+}
+```
+
+### 保存通知配置
+
+`PUT /api/notifications/email`
+
+```json
+{
+  "enabled": true,
+  "sender_email": "sender@163.com",
+  "authorization_code": "163 邮箱授权码",
+  "recipient_email": "ops@qq.com"
+}
+```
+
+授权码为空时保留已保存的授权码，便于修改开关或收件地址。服务将配置保存到数据目录下的 `email-notification.json`，文件权限为 `0600`；接口响应、操作日志和通知正文都不会包含授权码、Cookie、密码、别名地址或邮件正文。
+
+### 发送测试邮件
+
+`POST /api/notifications/email/test`
+
+该接口使用已保存的 163 发件、QQ 收件配置发送测试邮件。自动化通知使用有界异步队列，SMTP 失败最多重试 3 次，发送失败或队列已满不会阻塞别名任务。通知事件包括手动/定时自动化结果、自动暂停和 iCloud 会话失效；邮件正文只包含脱敏账户标识、事件、状态、数量和错误摘要。
+
+## Webhook Notifications
+
+Webhook destinations must use HTTPS. Each delivery sends a redacted JSON payload and includes `X-iCloud-HME-Timestamp`, `X-iCloud-HME-Delivery`, and `X-iCloud-HME-Signature` headers. The signature uses HMAC-SHA256 over `{timestamp}.{body}` and is formatted as `sha256={hex}`.
+
+### Read Webhook Configuration
+
+`GET /api/notifications/webhook`
+
+The response never returns the signing secret:
+
+```json
+{
+  "enabled": true,
+  "configured": true,
+  "url": "https://hooks.example.com/icloud"
+}
+```
+
+### Save Webhook Configuration
+
+`PUT /api/notifications/webhook`
+
+```json
+{
+  "enabled": true,
+  "url": "https://hooks.example.com/icloud",
+  "secret": "signing secret"
+}
+```
+
+An empty `secret` keeps the saved secret. The configuration is stored in `webhook-notification.json` with `0600` permissions; the secret is never included in API responses, operation logs, or event payloads.
+
+### Send a Test Webhook
+
+`POST /api/notifications/webhook/test`
+
+This synchronously sends a `webhook_test` event using the saved configuration. Automation results and iCloud session-expiry events use a separate bounded asynchronous queue with up to three attempts, so delivery failures cannot block alias work.
+
+Example event payload:
+
+```json
+{
+  "event": "alias_automation",
+  "account_id": "acco...alue",
+  "complete": true,
+  "created": 2,
+  "failed": 0,
+  "requested": 2,
+  "status": "success",
+  "trigger": "manual"
+}
+```

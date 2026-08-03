@@ -24,21 +24,22 @@ import (
 
 // Account 描述一个 iCloud 账号。
 type Account struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	RealEmail       string            `json:"real_email"`
-	ICloudEmail     string            `json:"icloud_email"`
-	Cookies         map[string]string `json:"cookies"`
-	Host            string            `json:"host"`
-	Proxy           string            `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
-	AppPassword     string            `json:"app_password,omitempty"`
-	Status          string            `json:"status"` // pending / active / error
-	AliasTotal      int               `json:"alias_total"`
-	AliasActive     int               `json:"alias_active"`
-	LastValidated   string            `json:"last_validated"`
-	LastError       string            `json:"last_error,omitempty"`
-	CreatedAt       string            `json:"created_at"`
-	AliasAutomation *AliasAutomation  `json:"alias_automation,omitempty"`
+	ID                   string                 `json:"id"`
+	Name                 string                 `json:"name"`
+	RealEmail            string                 `json:"real_email"`
+	ICloudEmail          string                 `json:"icloud_email"`
+	Cookies              map[string]string      `json:"cookies"`
+	Host                 string                 `json:"host"`
+	Proxy                string                 `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
+	AppPassword          string                 `json:"app_password,omitempty"`
+	Status               string                 `json:"status"` // pending / active / error
+	AliasTotal           int                    `json:"alias_total"`
+	AliasActive          int                    `json:"alias_active"`
+	LastValidated        string                 `json:"last_validated"`
+	LastError            string                 `json:"last_error,omitempty"`
+	CreatedAt            string                 `json:"created_at"`
+	AliasAutomation      *AliasAutomation       `json:"alias_automation,omitempty"`
+	AliasCreationHistory []AliasCreationHistory `json:"alias_creation_history,omitempty"`
 }
 
 type accountConfig struct {
@@ -98,6 +99,11 @@ func NewManager(dataDir string) (*Manager, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// DataDir returns the manager-owned local data directory.
+func (m *Manager) DataDir() string {
+	return m.dataDir
 }
 
 // Reload 重新加载 accounts.json 配置文件。
@@ -284,6 +290,11 @@ func decodeAccountConfig(raw []byte) (map[string]*Account, error) {
 			}
 			acc.AliasAutomation = &automation
 		}
+		history, err := normalizeStoredAliasCreationHistory(acc.AliasCreationHistory)
+		if err != nil {
+			return nil, fmt.Errorf("解析账户配置 accounts[%d] alias_creation_history: %w", i, err)
+		}
+		acc.AliasCreationHistory = history
 		byID[acc.ID] = acc
 	}
 	return byID, nil
@@ -311,6 +322,7 @@ func cloneAccount(acc *Account) *Account {
 	cloned := *acc
 	cloned.Cookies = cloneCookies(acc.Cookies)
 	cloned.AliasAutomation = cloneAliasAutomation(acc.AliasAutomation)
+	cloned.AliasCreationHistory = cloneAliasCreationHistory(acc.AliasCreationHistory)
 	return &cloned
 }
 

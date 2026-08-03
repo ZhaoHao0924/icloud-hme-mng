@@ -101,9 +101,29 @@ function Assert-APITokenFailure {
     [string]$Description
   )
 
-  Assert-That ($Response.StatusCode -eq 401) "$Description health check was not rejected."
+  Assert-AuthenticationFailure -Response $Response -Description $Description -ExpectedCode "api_token_invalid"
+}
+
+function Assert-PlatformAuthFailure {
+  param(
+    [object]$Response,
+    [string]$Description,
+    [string]$ExpectedCode
+  )
+
+  Assert-AuthenticationFailure -Response $Response -Description $Description -ExpectedCode $ExpectedCode
+}
+
+function Assert-AuthenticationFailure {
+  param(
+    [object]$Response,
+    [string]$Description,
+    [string]$ExpectedCode
+  )
+
+  Assert-That ($Response.StatusCode -eq 401) "$Description request was not rejected."
   $body = $Response.Content | ConvertFrom-Json
-  Assert-That ($body.success -eq $false -and $body.code -eq "api_token_invalid") "$Description health response did not expose the expected API Token error code (code=$($body.code); success=$($body.success))."
+  Assert-That ($body.success -eq $false -and $body.code -eq $ExpectedCode) "$Description response did not expose the expected authentication error code (code=$($body.code); success=$($body.success))."
 }
 
 function Test-PortAvailable {
@@ -214,8 +234,27 @@ try {
   Build-NativeSmokeBinary
   Start-SmokeServer
 
-  Assert-APITokenFailure -Response (Get-HttpResponse -Uri "$baseUrl/api/health") -Description "Missing API Token"
+  Assert-PlatformAuthFailure -Response (Get-HttpResponse -Uri "$baseUrl/api/health") -Description "Unconfigured platform" -ExpectedCode "platform_auth_setup_required"
   Assert-APITokenFailure -Response (Get-HttpResponse -Uri "$baseUrl/api/health" -Headers $invalidAuthHeaders) -Description "Invalid API Token"
+
+  $platformSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+  $platformCredentials = @{ password = "correct-horse-battery-staple"; username = "smoke-admin" } | ConvertTo-Json -Compress
+  $platformSetup = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/auth/setup" -Method Post -Headers $authHeaders -ContentType "application/json" -Body $platformCredentials -WebSession $platformSession -ErrorAction Stop
+  $platformSetupBody = $platformSetup.Content | ConvertFrom-Json
+  Assert-That ($platformSetupBody.success -eq $true -and $platformSetupBody.data.authenticated -eq $true -and $platformSetupBody.data.username -eq "smoke-admin") "Platform administrator setup did not establish a browser session."
+  Assert-That ($platformSetup.Headers["Set-Cookie"] -match "HttpOnly" -and $platformSetup.Headers["Set-Cookie"] -match "SameSite=Strict") "Platform session cookie is missing expected security attributes."
+
+  $sessionHealth = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/health" -WebSession $platformSession -ErrorAction Stop
+  Assert-That ($sessionHealth.StatusCode -eq 200) "Platform browser session could not access a protected API."
+
+  $platformLogout = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/auth/logout" -Method Post -WebSession $platformSession -ErrorAction Stop
+  $platformLogoutBody = $platformLogout.Content | ConvertFrom-Json
+  Assert-That ($platformLogoutBody.success -eq $true -and $platformLogoutBody.data.authenticated -eq $false) "Platform logout did not clear the browser session."
+  Assert-PlatformAuthFailure -Response (Get-HttpResponse -Uri "$baseUrl/api/health") -Description "Logged-out platform session" -ExpectedCode "platform_auth_required"
+
+  $platformLogin = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/auth/login" -Method Post -ContentType "application/json" -Body $platformCredentials -WebSession $platformSession -ErrorAction Stop
+  $platformLoginBody = $platformLogin.Content | ConvertFrom-Json
+  Assert-That ($platformLoginBody.success -eq $true -and $platformLoginBody.data.authenticated -eq $true) "Platform administrator login did not establish a browser session."
 
   $rootResponse = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/" -Headers @{ Accept = "text/html" } -ErrorAction Stop
   Assert-That ($rootResponse.StatusCode -eq 200) "Root page did not return HTTP 200."
@@ -246,6 +285,11 @@ try {
 
   Stop-SmokeServer
   Start-SmokeServer
+
+  $sessionAfterRestart = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/auth/session" -WebSession $platformSession -ErrorAction Stop
+  $sessionAfterRestartBody = $sessionAfterRestart.Content | ConvertFrom-Json
+  Assert-That ($sessionAfterRestartBody.success -eq $true -and $sessionAfterRestartBody.data.configured -eq $true -and $sessionAfterRestartBody.data.authenticated -eq $false) "Platform session unexpectedly survived a service restart."
+  Assert-PlatformAuthFailure -Response (Get-HttpResponse -Uri "$baseUrl/api/health") -Description "Restarted platform session" -ExpectedCode "platform_auth_required"
 
   $accountsResponse = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/accounts" -Headers $authHeaders -ErrorAction Stop
   $accounts = $accountsResponse.Content | ConvertFrom-Json

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { AtSign, RotateCcw, Search, X } from "lucide-react";
+import { AtSign, ChevronLeft, ChevronRight, RotateCcw, Search, X } from "lucide-react";
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -20,10 +20,29 @@ const statusFilters = [
   { label: "已停用", value: "inactive" },
 ] as const;
 
+const aliasPageSize = 10;
+
 type AliasStatusFilter = (typeof statusFilters)[number]["value"];
 
 function parseStatusFilter(value: string | null): AliasStatusFilter {
   return value === "active" || value === "inactive" ? value : "all";
+}
+
+function parseAliasPage(value: string | null) {
+  const page = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
+function sortAliasesByCreatedAt(aliases: Alias[]) {
+  return [...aliases].sort((left, right) => {
+    const leftTime = Date.parse(left.createdAt);
+    const rightTime = Date.parse(right.createdAt);
+    const leftValid = !Number.isNaN(leftTime);
+    const rightValid = !Number.isNaN(rightTime);
+    if (leftValid !== rightValid) return leftValid ? -1 : 1;
+    if (leftValid && leftTime !== rightTime) return rightTime - leftTime;
+    return left.anonymousId.localeCompare(right.anonymousId);
+  });
 }
 
 function formatAliasDate(value: string) {
@@ -50,7 +69,11 @@ export function AliasesPage() {
   const aliasesQuery = useQuery(aliasesQueryOptions(account.id));
   const searchQuery = searchParams.get("q") ?? "";
   const statusFilter = parseStatusFilter(searchParams.get("status"));
-  const aliases = useMemo(() => aliasesQuery.data?.aliases ?? [], [aliasesQuery.data]);
+  const requestedPage = parseAliasPage(searchParams.get("page"));
+  const aliases = useMemo(
+    () => sortAliasesByCreatedAt(aliasesQuery.data?.aliases ?? []),
+    [aliasesQuery.data],
+  );
 
   const statusCounts = useMemo(
     () => ({
@@ -74,6 +97,13 @@ export function AliasesPage() {
     });
   }, [aliases, searchQuery, statusFilter]);
 
+  const pageCount = Math.max(1, Math.ceil(visibleAliases.length / aliasPageSize));
+  const currentPage = Math.min(requestedPage, pageCount);
+  const pagedAliases = useMemo(() => {
+    const start = (currentPage - 1) * aliasPageSize;
+    return visibleAliases.slice(start, start + aliasPageSize);
+  }, [currentPage, visibleAliases]);
+
   function updateFilters(nextQuery: string, nextStatus: AliasStatusFilter) {
     const nextParams = new URLSearchParams(searchParams);
     if (nextQuery) {
@@ -85,6 +115,17 @@ export function AliasesPage() {
       nextParams.delete("status");
     } else {
       nextParams.set("status", nextStatus);
+    }
+    nextParams.delete("page");
+    setSearchParams(nextParams, { replace: true });
+  }
+
+  function updatePage(nextPage: number) {
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextPage <= 1) {
+      nextParams.delete("page");
+    } else {
+      nextParams.set("page", String(nextPage));
     }
     setSearchParams(nextParams, { replace: true });
   }
@@ -222,7 +263,7 @@ export function AliasesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleAliases.map((alias: Alias) => (
+                  {pagedAliases.map((alias: Alias) => (
                     <tr key={alias.anonymousId}>
                       <th scope="row" data-label="邮箱">
                         <span className="alias-email-row">
@@ -257,6 +298,35 @@ export function AliasesPage() {
                   ))}
                 </tbody>
               </table>
+              {visibleAliases.length > aliasPageSize ? (
+                <nav className="alias-pagination" aria-label="别名列表分页">
+                  <span className="alias-pagination-summary">
+                    {currentPage} / {pageCount} 页
+                  </span>
+                  <div className="alias-pagination-controls">
+                    <button
+                      className="icon-button alias-pagination-button"
+                      type="button"
+                      aria-label="上一页"
+                      title="上一页"
+                      disabled={currentPage === 1}
+                      onClick={() => updatePage(currentPage - 1)}
+                    >
+                      <ChevronLeft size={17} aria-hidden="true" />
+                    </button>
+                    <button
+                      className="icon-button alias-pagination-button"
+                      type="button"
+                      aria-label="下一页"
+                      title="下一页"
+                      disabled={currentPage === pageCount}
+                      onClick={() => updatePage(currentPage + 1)}
+                    >
+                      <ChevronRight size={17} aria-hidden="true" />
+                    </button>
+                  </div>
+                </nav>
+              ) : null}
             </div>
           )}
         </>

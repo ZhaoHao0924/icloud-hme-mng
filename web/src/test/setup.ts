@@ -6,7 +6,11 @@ import { clearApiToken } from "../api/apiTokenSession";
 import {
   mockAccounts,
   mockAliasAutomation,
+  mockAliasCreationHistory,
   mockAliases,
+  mockPlatformAuth,
+  mockEmailNotification,
+  mockWebhookNotification,
   mockScenario,
   server,
 } from "./mocks/server";
@@ -20,7 +24,11 @@ afterEach(() => {
   clearApiToken();
   mockAccounts.reset();
   mockAliasAutomation.reset();
+  mockAliasCreationHistory.reset();
   mockAliases.reset();
+  mockPlatformAuth.reset();
+  mockEmailNotification.reset();
+  mockWebhookNotification.reset();
   mockScenario.reset();
   server.resetHandlers();
 });

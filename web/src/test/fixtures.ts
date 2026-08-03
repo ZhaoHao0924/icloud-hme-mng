@@ -1,4 +1,13 @@
-import type { Account, Alias, Health, InboxMessage, OtpChallenge } from "../api/schemas";
+import type {
+  Account,
+  Alias,
+  EmailNotification,
+  Health,
+  InboxMessage,
+  OperationLogs,
+  OtpChallenge,
+  WebhookNotification,
+} from "../api/schemas";
 
 export const accountFixtures: Account[] = [
   {
@@ -126,6 +135,50 @@ export const degradedServiceFixture: Health = {
   service: "icloud-hme",
   status: "degraded",
   version: "dev",
+};
+
+export const operationLogsFixture: OperationLogs = {
+  count: 3,
+  entries: [
+    {
+      duration_ms: 842,
+      level: "info",
+      operation: "读取收件箱",
+      status: 200,
+      timestamp: "2026-08-02T08:30:00Z",
+    },
+    {
+      duration_ms: 64,
+      level: "warning",
+      operation: "更新 Cookie",
+      status: 401,
+      timestamp: "2026-08-02T08:10:00Z",
+    },
+    {
+      duration_ms: 2_541,
+      level: "error",
+      operation: "批量创建别名",
+      status: 502,
+      timestamp: "2026-08-02T07:55:00Z",
+    },
+  ],
+  retention_days: 7,
+};
+
+export const emailNotificationFixture: EmailNotification = {
+  configured: false,
+  enabled: false,
+  provider: "163",
+  sender_email: "",
+  recipient_email: "",
+  smtp_host: "smtp.163.com",
+  smtp_port: 465,
+};
+
+export const webhookNotificationFixture: WebhookNotification = {
+  configured: false,
+  enabled: false,
+  url: "",
 };
 
 export const otpChallengeFixture: OtpChallenge = {

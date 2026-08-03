@@ -12,6 +12,10 @@ export const mockScenarios = [
   "inbox-error",
   "inbox-timeout",
   "inbox-long",
+  "inbox-paged",
+  "inbox-scroll",
+  "platform-login",
+  "platform-setup",
 ] as const;
 
 export type MockScenario = (typeof mockScenarios)[number];

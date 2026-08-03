@@ -37,6 +37,7 @@ export function createMockAliasStore() {
       aliasesByAccount.set(accountId, [alias, ...(aliasesByAccount.get(accountId) ?? [])]);
       return {
         account_id: accountId,
+        batch_id: "",
         created_at: createdAt,
         email,
         label,

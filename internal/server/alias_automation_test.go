@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ type fakeAliasOperationClient struct {
 	createCalls  int
 	createErrAt  int
 	createLabels []string
+	sessionCalls int
 	entered      chan struct{}
 	release      <-chan struct{}
 }
@@ -66,6 +68,9 @@ func (c *fakeAliasOperationClient) ListAliases() ([]hme.Alias, error) {
 func (c *fakeAliasOperationClient) ReactivateHME(string) (bool, error) { return true, nil }
 
 func (c *fakeAliasOperationClient) SessionCookies() map[string]string {
+	c.mu.Lock()
+	c.sessionCalls++
+	c.mu.Unlock()
 	return map[string]string{"session": "updated"}
 }
 
@@ -79,6 +84,12 @@ func (c *fakeAliasOperationClient) createCallCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.createCalls
+}
+
+func (c *fakeAliasOperationClient) sessionCookieCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionCalls
 }
 
 func newAutomationTestManager(t *testing.T) *account.Manager {
@@ -144,6 +155,18 @@ func TestAliasAutomationCreateCount(t *testing.T) {
 			active: 3,
 			want:   4,
 		},
+		{
+			name:   "cumulative target creates up to the per-run cap",
+			rule:   account.AliasAutomation{TargetCreated: 750, MaxBatchSize: 5},
+			active: 0,
+			want:   5,
+		},
+		{
+			name:   "cumulative target shrinks the final run to the remaining count",
+			rule:   account.AliasAutomation{TargetCreated: 750, CreatedTotal: 748, MaxBatchSize: 5},
+			active: 0,
+			want:   2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -193,6 +216,204 @@ func TestAliasAutomationRunReplenishesInventoryAndPersistsStatus(t *testing.T) {
 	}
 	if result.Automation.NextRunAt != now.Add(35*time.Minute).Format(time.RFC3339) {
 		t.Errorf("NextRunAt = %q, want %q", result.Automation.NextRunAt, now.Add(35*time.Minute).Format(time.RFC3339))
+	}
+}
+
+func TestAliasAutomationRunStopsAtCumulativeTarget(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.IntervalMinutes = 60
+	rule.MaxBatchSize = 5
+	rule.TargetCreated = 5
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	if _, err := mgr.RecordAliasAutomationRun("acc_automation", account.AliasAutomationRun{
+		ActiveAliases: 3,
+		Created:       3,
+		Status:        account.AliasAutomationStatusSuccess,
+	}, now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("RecordAliasAutomationRun() partial error = %v", err)
+	}
+
+	client := &fakeAliasOperationClient{}
+	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
+	service.now = func() time.Time { return now.Add(10 * time.Minute) }
+
+	result, err := service.RunNow("acc_automation")
+	if err != nil {
+		t.Fatalf("RunNow() error = %v", err)
+	}
+	if result.Requested != 2 || result.Created != 2 || result.Status != account.AliasAutomationStatusSuccess {
+		t.Errorf("run result = %+v, want final two aliases", result)
+	}
+	if result.Automation.CreatedTotal != 5 || result.Automation.Enabled || result.Automation.NextRunAt != "" {
+		t.Errorf("completed automation = %+v, want disabled target", result.Automation)
+	}
+	if got := client.createCallCount(); got != 2 {
+		t.Errorf("create calls = %d, want 2", got)
+	}
+}
+
+func TestAliasAutomationRunStopsAtTotalAliasSafetyLimit(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.IntervalMinutes = 60
+	rule.ScheduledBatchSize = 5
+	rule.MaxBatchSize = 5
+	rule.MaxTotalAliases = 3
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+
+	client := &fakeAliasOperationClient{aliases: []hme.Alias{{Active: true}, {Active: true}}}
+	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
+	service.now = func() time.Time { return now.Add(5 * time.Minute) }
+
+	result, err := service.RunNow("acc_automation")
+	if err != nil {
+		t.Fatalf("RunNow() error = %v", err)
+	}
+	if result.Requested != 1 || result.Created != 1 || result.Status != account.AliasAutomationStatusSuccess {
+		t.Errorf("run result = %+v, want one safe final alias", result)
+	}
+	if result.Automation.Enabled || result.Automation.PauseReason != account.AliasAutomationPauseReasonAliasLimit || result.Automation.NextRunAt != "" {
+		t.Errorf("safety-limited automation = %+v, want alias-limit pause", result.Automation)
+	}
+	if got := client.createCallCount(); got != 1 {
+		t.Errorf("create calls = %d, want 1", got)
+	}
+	history, err := mgr.ListAliasCreationHistory("acc_automation", 10)
+	if err != nil {
+		t.Fatalf("ListAliasCreationHistory() error = %v", err)
+	}
+	if len(history) != 1 || history[0].Trigger != account.AliasCreationTriggerAutomationManual || history[0].Created != 1 || len(history[0].Aliases) != 1 || result.BatchID != history[0].BatchID {
+		t.Errorf("creation history = %+v, result batch ID = %q", history, result.BatchID)
+	}
+}
+
+func TestAliasAutomationRunDefersAfterDailyCreationLimit(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.ScheduledBatchSize = 5
+	rule.MaxBatchSize = 5
+	rule.DailyCreationLimit = 3
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+
+	client := &fakeAliasOperationClient{}
+	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
+	runAt := now.Add(5 * time.Minute)
+	service.now = func() time.Time { return runAt }
+	first, err := service.RunNow("acc_automation")
+	if err != nil {
+		t.Fatalf("first RunNow() error = %v", err)
+	}
+	wantNextRun := account.NextAliasAutomationDayStart(runAt).Format(time.RFC3339)
+	if first.Created != 3 || first.Requested != 3 || first.Status != account.AliasAutomationStatusSuccess || first.Automation.DailyCreated != 3 || first.Automation.NextRunAt != wantNextRun {
+		t.Errorf("first run = %+v, want daily-limited creation", first)
+	}
+
+	service.now = func() time.Time { return now.Add(10 * time.Minute) }
+	second, err := service.RunNow("acc_automation")
+	if err != nil {
+		t.Fatalf("second RunNow() error = %v", err)
+	}
+	if second.Created != 0 || second.Status != account.AliasAutomationStatusSkipped || second.Automation.NextRunAt != wantNextRun || !strings.Contains(second.Automation.LastError, "今日自动创建上限") {
+		t.Errorf("second run = %+v, want deferred daily-limit skip", second)
+	}
+	if got := client.createCallCount(); got != 3 {
+		t.Errorf("create calls = %d, want 3", got)
+	}
+}
+
+func TestAliasAutomationManualRunRequiresResumeAfterAutoPause(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.ScheduledBatchSize = 1
+	rule.MaxFailureCount = 1
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	paused, err := mgr.RecordAliasAutomationRun("acc_automation", account.AliasAutomationRun{
+		ActiveAliases: 0,
+		Error:         "upstream create failed",
+		Status:        account.AliasAutomationStatusError,
+	}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RecordAliasAutomationRun() error = %v", err)
+	}
+	if paused.Enabled || paused.PauseReason != account.AliasAutomationPauseReasonFailureLimit {
+		t.Fatalf("paused automation = %+v, want failure-limit pause", paused)
+	}
+
+	client := &fakeAliasOperationClient{}
+	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
+	result, err := service.RunNow("acc_automation")
+	if !errors.Is(err, errAliasAutomationPaused) {
+		t.Fatalf("RunNow() error = %v, want auto-pause error", err)
+	}
+	if result.Automation.PauseReason != account.AliasAutomationPauseReasonFailureLimit {
+		t.Errorf("run result automation = %+v, want preserved pause", result.Automation)
+	}
+	if got := client.createCallCount(); got != 0 {
+		t.Errorf("create calls = %d, want 0 while paused", got)
+	}
+}
+
+func TestAliasAutomationPauseAndResumeAPI(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.ScheduledBatchSize = 1
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	srv := New(mgr, false, "")
+	t.Cleanup(srv.Close)
+
+	pauseRequest := httptest.NewRequest(http.MethodPost, "/api/accounts/acc_automation/alias-automation/pause", nil)
+	pauseResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pauseResponse, pauseRequest)
+	if pauseResponse.Code != http.StatusOK {
+		t.Fatalf("pause status = %d, body = %s", pauseResponse.Code, pauseResponse.Body.String())
+	}
+	var paused struct {
+		Data    account.AliasAutomation `json:"data"`
+		Success bool                    `json:"success"`
+	}
+	if err := json.Unmarshal(pauseResponse.Body.Bytes(), &paused); err != nil {
+		t.Fatalf("decode pause response: %v", err)
+	}
+	if !paused.Success || paused.Data.Enabled || paused.Data.PauseReason != account.AliasAutomationPauseReasonManual || paused.Data.NextRunAt != "" {
+		t.Errorf("pause response = %+v", paused)
+	}
+
+	resumeRequest := httptest.NewRequest(http.MethodPost, "/api/accounts/acc_automation/alias-automation/resume", nil)
+	resumeResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(resumeResponse, resumeRequest)
+	if resumeResponse.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, body = %s", resumeResponse.Code, resumeResponse.Body.String())
+	}
+	var resumed struct {
+		Data    account.AliasAutomation `json:"data"`
+		Success bool                    `json:"success"`
+	}
+	if err := json.Unmarshal(resumeResponse.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resume response: %v", err)
+	}
+	if !resumed.Success || !resumed.Data.Enabled || resumed.Data.PauseReason != "" || resumed.Data.NextRunAt == "" {
+		t.Errorf("resume response = %+v", resumed)
 	}
 }
 
@@ -248,8 +469,11 @@ func TestAliasOperationsSerializeSameAccount(t *testing.T) {
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first batch error = %v", err)
 	}
-	<-factoryStarts
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second operation did not reach the reused client after the first operation completed")
+	}
 	if err := <-secondDone; err != nil {
 		t.Fatalf("second batch error = %v", err)
 	}
@@ -270,6 +494,10 @@ func TestAliasAutomationRunDueExecutesOnlyWhenDue(t *testing.T) {
 	client := &fakeAliasOperationClient{}
 	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
 	service.now = func() time.Time { return now.Add(30 * time.Minute) }
+	audits := make(chan aliasAutomationScheduledRun, 1)
+	service.onScheduledRun = func(run aliasAutomationScheduledRun) {
+		audits <- run
+	}
 	service.RunDue()
 
 	deadline := time.Now().Add(time.Second)
@@ -289,12 +517,132 @@ func TestAliasAutomationRunDueExecutesOnlyWhenDue(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	select {
+	case run := <-audits:
+		if run.Status != account.AliasAutomationStatusSuccess || run.Created != 1 || run.Failed != 0 || run.PauseReason != "" {
+			t.Errorf("scheduled audit = %+v", run)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunDue() did not emit a persisted scheduled-run audit")
+	}
 
 	service.now = func() time.Time { return now.Add(31 * time.Minute) }
 	service.RunDue()
 	time.Sleep(25 * time.Millisecond)
 	if got := client.createCallCount(); got != 1 {
 		t.Errorf("create calls after a not-due scan = %d, want 1", got)
+	}
+}
+
+func TestAliasAutomationRunDueDefersOutsideSchedule(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	configuredAt := time.Date(2026, time.August, 3, 9, 0, 0, 0, time.UTC)
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.IntervalMinutes = 60
+	rule.ScheduledBatchSize = 1
+	rule.MaxBatchSize = 1
+	rule.AllowedWeekdays = []int{1, 2, 3, 4, 5}
+	rule.ExecutionWindowStart = "09:00"
+	rule.ExecutionWindowEnd = "17:00"
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, configuredAt); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+
+	client := &fakeAliasOperationClient{}
+	service := newAliasAutomationService(mgr, newFakeAliasOperations(mgr, client))
+	dueAfterWindow := time.Date(2026, time.August, 3, 17, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return dueAfterWindow }
+	service.RunDue()
+
+	automation, err := mgr.GetAliasAutomation("acc_automation")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() error = %v", err)
+	}
+	wantNextRun := time.Date(2026, time.August, 4, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if automation.NextRunAt != wantNextRun || automation.LastRunAt != "" {
+		t.Errorf("deferred automation = %+v, want next run %q without a recorded run", automation, wantNextRun)
+	}
+	if got := client.createCallCount(); got != 0 {
+		t.Errorf("create calls = %d, want 0", got)
+	}
+
+	service.now = func() time.Time { return dueAfterWindow.Add(time.Minute) }
+	service.RunDue()
+	if got := client.createCallCount(); got != 0 {
+		t.Errorf("create calls after deferred scan = %d, want 0", got)
+	}
+}
+
+func TestAliasAutomationPreviewAPIDoesNotCreateOrPersist(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	now := time.Date(2026, time.August, 2, 8, 0, 0, 0, time.UTC)
+	client := &fakeAliasOperationClient{aliases: []hme.Alias{
+		{Active: true}, {Active: true}, {Active: false},
+	}}
+	srv := New(mgr, false, "")
+	t.Cleanup(srv.Close)
+	srv.aliasOperations = newFakeAliasOperations(mgr, client)
+	srv.aliasAutomation = newAliasAutomationService(mgr, srv.aliasOperations)
+	srv.aliasAutomation.now = func() time.Time { return now }
+
+	rule := account.DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.ScheduledBatchSize = 5
+	rule.MaxBatchSize = 5
+	rule.MaxTotalAliases = 4
+	rule.DailyCreationLimit = 3
+	rule.TargetCreated = 10
+	rule.AllowedWeekdays = []int{1, 2, 3, 4, 5}
+	rule.ExecutionWindowStart = "09:00"
+	rule.ExecutionWindowEnd = "17:00"
+	if _, err := mgr.SetAliasAutomation("acc_automation", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	before, err := mgr.GetAliasAutomation("acc_automation")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() before preview error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/accounts/acc_automation/alias-automation/preview", nil)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data    aliasAutomationPreviewResult `json:"data"`
+		Success bool                         `json:"success"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if !body.Success || body.Data.TotalAliases != 3 || body.Data.ActiveAliases != 2 || body.Data.Requested != 1 || body.Data.DailyRemaining != 3 || body.Data.RemainingTotalCapacity != 1 || body.Data.TargetRemaining != 10 || body.Data.ScheduleAllowed || body.Data.ScheduleReason == "" {
+		t.Errorf("preview response = %+v", body)
+	}
+	wantEligibleAt := time.Date(2026, time.August, 3, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if body.Data.NextEligibleAt != wantEligibleAt {
+		t.Errorf("NextEligibleAt = %q, want %q", body.Data.NextEligibleAt, wantEligibleAt)
+	}
+	if got := client.createCallCount(); got != 0 {
+		t.Errorf("create calls = %d, want 0", got)
+	}
+	if got := client.sessionCookieCallCount(); got != 0 {
+		t.Errorf("SessionCookies() calls = %d, want 0", got)
+	}
+	after, err := mgr.GetAliasAutomation("acc_automation")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() after preview error = %v", err)
+	}
+	if after.LastRunAt != before.LastRunAt || after.CreatedTotal != before.CreatedTotal || after.NextRunAt != before.NextRunAt {
+		t.Errorf("preview changed automation state: before=%+v after=%+v", before, after)
+	}
+	history, err := mgr.ListAliasCreationHistory("acc_automation", 10)
+	if err != nil {
+		t.Fatalf("ListAliasCreationHistory() error = %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("preview recorded history = %+v", history)
 	}
 }
 
@@ -334,6 +682,67 @@ func TestAliasAutomationStartStopsAfterLastRuleIsDisabled(t *testing.T) {
 	}
 }
 
+func TestAliasCreationHistoryAPIAndCSVExport(t *testing.T) {
+	mgr := newAutomationTestManager(t)
+	srv := New(mgr, false, "")
+	t.Cleanup(srv.Close)
+	client := &fakeAliasOperationClient{}
+	srv.aliasOperations = newFakeAliasOperations(mgr, client)
+	srv.aliasAutomation = newAliasAutomationService(mgr, srv.aliasOperations)
+
+	batchRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/acc_automation/aliases/batch",
+		bytes.NewBufferString(`{"count":2,"label_prefix":"trace"}`),
+	)
+	batchRequest.Header.Set("Content-Type", "application/json")
+	batchResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(batchResponse, batchRequest)
+	if batchResponse.Code != http.StatusOK {
+		t.Fatalf("batch status = %d, body = %s", batchResponse.Code, batchResponse.Body.String())
+	}
+	var batchBody struct {
+		Data    aliasBatchResult `json:"data"`
+		Success bool             `json:"success"`
+	}
+	if err := json.Unmarshal(batchResponse.Body.Bytes(), &batchBody); err != nil {
+		t.Fatalf("decode batch response: %v", err)
+	}
+	if !batchBody.Success || batchBody.Data.BatchID == "" || len(batchBody.Data.Aliases) != 2 || batchBody.Data.Aliases[0].BatchID != batchBody.Data.BatchID {
+		t.Fatalf("batch response = %+v", batchBody)
+	}
+
+	historyRequest := httptest.NewRequest(http.MethodGet, "/api/accounts/acc_automation/alias-creation-history?limit=10", nil)
+	historyResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(historyResponse, historyRequest)
+	if historyResponse.Code != http.StatusOK {
+		t.Fatalf("history status = %d, body = %s", historyResponse.Code, historyResponse.Body.String())
+	}
+	var historyBody struct {
+		Data    aliasCreationHistoryData `json:"data"`
+		Success bool                     `json:"success"`
+	}
+	if err := json.Unmarshal(historyResponse.Body.Bytes(), &historyBody); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	if !historyBody.Success || historyBody.Data.Count != 1 || len(historyBody.Data.Entries) != 1 || historyBody.Data.Entries[0].BatchID != batchBody.Data.BatchID || historyBody.Data.Entries[0].Trigger != account.AliasCreationTriggerBatch {
+		t.Errorf("history response = %+v", historyBody)
+	}
+
+	csvRequest := httptest.NewRequest(http.MethodGet, "/api/accounts/acc_automation/alias-creation-history.csv", nil)
+	csvResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(csvResponse, csvRequest)
+	if csvResponse.Code != http.StatusOK {
+		t.Fatalf("CSV status = %d, body = %s", csvResponse.Code, csvResponse.Body.String())
+	}
+	if got := csvResponse.Header().Get("Content-Disposition"); got != `attachment; filename="alias-creation-history.csv"` {
+		t.Errorf("Content-Disposition = %q", got)
+	}
+	if !strings.Contains(csvResponse.Body.String(), batchBody.Data.BatchID) || !strings.Contains(csvResponse.Body.String(), "created-1@icloud.com") {
+		t.Errorf("CSV body is missing batch trace: %s", csvResponse.Body.String())
+	}
+}
+
 func TestAliasAutomationConfigurationAndBatchValidationAPI(t *testing.T) {
 	mgr := newAutomationTestManager(t)
 	srv := New(mgr, false, "")
@@ -345,13 +754,25 @@ func TestAliasAutomationConfigurationAndBatchValidationAPI(t *testing.T) {
 	rule := account.DefaultAliasAutomation()
 	rule.Enabled = true
 	rule.IntervalMinutes = 30
+	rule.AllowedWeekdays = []int{1, 3, 5}
+	rule.ExecutionWindowStart = "09:00"
+	rule.ExecutionWindowEnd = "17:00"
 	rule.ScheduledBatchSize = 2
 	rule.MaxBatchSize = 4
+	rule.TargetCreated = 5
+	rule.MaxTotalAliases = 900
+	rule.MaxFailureCount = 4
 	body, err := json.Marshal(aliasAutomationReq{
-		Enabled:            rule.Enabled,
-		IntervalMinutes:    rule.IntervalMinutes,
-		ScheduledBatchSize: rule.ScheduledBatchSize,
-		MaxBatchSize:       rule.MaxBatchSize,
+		Enabled:              rule.Enabled,
+		IntervalMinutes:      rule.IntervalMinutes,
+		AllowedWeekdays:      rule.AllowedWeekdays,
+		ExecutionWindowStart: rule.ExecutionWindowStart,
+		ExecutionWindowEnd:   rule.ExecutionWindowEnd,
+		ScheduledBatchSize:   rule.ScheduledBatchSize,
+		MaxBatchSize:         rule.MaxBatchSize,
+		MaxTotalAliases:      rule.MaxTotalAliases,
+		MaxFailureCount:      rule.MaxFailureCount,
+		TargetCreated:        rule.TargetCreated,
 	})
 	if err != nil {
 		t.Fatalf("marshal rule: %v", err)
@@ -377,7 +798,7 @@ func TestAliasAutomationConfigurationAndBatchValidationAPI(t *testing.T) {
 	if err := json.Unmarshal(getRes.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode GET response: %v", err)
 	}
-	if !response.Success || !response.Data.Enabled || response.Data.ScheduledBatchSize != 2 || response.Data.NextRunAt == "" {
+	if !response.Success || !response.Data.Enabled || response.Data.ScheduledBatchSize != 2 || response.Data.TargetCreated != 5 || response.Data.MaxTotalAliases != 900 || response.Data.MaxFailureCount != 4 || response.Data.NextRunAt == "" || fmt.Sprint(response.Data.AllowedWeekdays) != "[1 3 5]" || response.Data.ExecutionWindowStart != "09:00" || response.Data.ExecutionWindowEnd != "17:00" {
 		t.Errorf("unexpected automation response: %+v", response)
 	}
 

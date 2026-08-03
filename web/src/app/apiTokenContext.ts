@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 
 export type ApiTokenContextValue = {
+  clearApiToken: () => void;
   hasApiToken: boolean;
   openApiTokenDialog: () => void;
 };

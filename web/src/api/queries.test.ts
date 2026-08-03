@@ -7,10 +7,11 @@ import {
   aliasesQueryOptions,
   healthQueryOptions,
   inboxQueryOptions,
+  operationLogsQueryOptions,
   queryKeys,
 } from "./queries";
 import { createQueryClient } from "../app/queryClient";
-import { accountFixtures, aliasFixtures } from "../test/fixtures";
+import { accountFixtures, aliasFixtures, operationLogsFixture } from "../test/fixtures";
 import { mockScenario } from "../test/mocks/server";
 
 const testApi = createApiClient({ baseUrl: "http://localhost/api" });
@@ -21,12 +22,27 @@ describe("query integration", () => {
     expect(queryKeys.account("acc_primary")).toEqual(["account", "acc_primary"]);
     expect(queryKeys.aliasAutomation("acc_primary")).toEqual(["alias-automation", "acc_primary"]);
     expect(queryKeys.aliases("acc_primary")).toEqual(["aliases", "acc_primary"]);
+    expect(queryKeys.operationLogs).toEqual(["operation-logs"]);
     expect(queryKeys.inbox({ accountId: "acc_primary" })).toEqual([
       "inbox",
       "acc_primary",
       "",
       20,
       7,
+    ]);
+    expect(queryKeys.inboxFeed({ accountId: "acc_primary" }, 2)).toEqual([
+      "inbox",
+      "acc_primary",
+      "",
+      20,
+      7,
+      "feed",
+      2,
+    ]);
+    expect(queryKeys.inboxMessage("acc_primary", "1042")).toEqual([
+      "inbox-message",
+      "acc_primary",
+      "1042",
     ]);
   });
 
@@ -37,6 +53,7 @@ describe("query integration", () => {
     const automation = await client.fetchQuery(aliasAutomationQueryOptions("acc_primary", testApi));
     const aliases = await client.fetchQuery(aliasesQueryOptions("acc_primary", testApi));
     const health = await client.fetchQuery(healthQueryOptions(testApi));
+    const operationLogs = await client.fetchQuery(operationLogsQueryOptions(testApi));
 
     expect(accounts).toEqual(accountFixtures);
     expect(automation).toMatchObject({ enabled: false, interval_minutes: 60, max_batch_size: 5 });
@@ -46,6 +63,7 @@ describe("query integration", () => {
       count: aliasFixtures.length,
     });
     expect(health).toMatchObject({ status: "ok", config_available: true });
+    expect(operationLogs).toEqual(operationLogsFixture);
   });
 
   it("switches the same handlers to empty data", async () => {

@@ -54,6 +54,48 @@ describe("AliasesPage", () => {
     expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("sorts aliases by creation time and paginates the filtered list", async () => {
+    const aliases = Array.from({ length: 25 }, (_, index) => ({
+      ...aliasFixtures[0],
+      anonymousId: `page-alias-${index + 1}`,
+      createdAt: new Date(Date.UTC(2026, 7, 25 - index)).toISOString(),
+      email: `page-alias-${index + 1}@icloud.com`,
+      label: `Page ${index + 1}`,
+    }));
+    server.use(
+      http.get("*/api/aliases", ({ request }) => {
+        const accountId = new URL(request.url).searchParams.get("account_id") ?? "";
+        return HttpResponse.json({
+          data: { account_id: accountId, aliases: [...aliases].reverse(), count: aliases.length },
+          success: true,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    const { router } = renderAliases();
+
+    const table = await screen.findByRole("table", { name: "别名列表" });
+    expect(within(table).getAllByRole("row")).toHaveLength(11);
+    expect(within(table).getByText("page-alias-1@icloud.com")).toBeInTheDocument();
+    expect(within(table).queryByText("page-alias-11@icloud.com")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(within(table).getAllByRole("row")).toHaveLength(11);
+    expect(within(table).getByText("page-alias-11@icloud.com")).toBeInTheDocument();
+    expect(within(table).queryByText("page-alias-1@icloud.com")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+    expect(new URLSearchParams(router.state.location.search).get("page")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(within(table).getAllByRole("row")).toHaveLength(6);
+    expect(within(table).getByText("page-alias-21@icloud.com")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    expect(new URLSearchParams(router.state.location.search).get("page")).toBe("3");
+  });
+
   it("refreshes the server list after stopping and restoring an alias", async () => {
     const user = userEvent.setup();
     renderAliases();

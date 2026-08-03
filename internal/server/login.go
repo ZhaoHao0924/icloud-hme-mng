@@ -148,6 +148,7 @@ func (s *Server) startAccountLogin(c *gin.Context) {
 	}
 	if session == nil {
 		s.loginChallenges.invalidateAccount(accountID)
+		s.aliasOperations.invalidateAccount(accountID)
 		ok(c, dto)
 		return
 	}
@@ -187,6 +188,7 @@ func (s *Server) verifyAccountLogin(c *gin.Context) {
 		fail(c, http.StatusGone, "登录 challenge 无效或已过期，请重新提交密码")
 		return
 	}
+	s.aliasOperations.invalidateAccount(c.Param("id"))
 	dto, err := s.verifyPasswordLogin(session, req.OTPCode)
 	if err != nil {
 		failPasswordLogin(c, "验证码验证失败: ", err)

@@ -29,6 +29,9 @@ const accountFixture = {
 const aliasAutomationFixture = {
   enabled: true,
   interval_minutes: 60,
+  allowed_weekdays: [],
+  execution_window_start: "",
+  execution_window_end: "",
   label_prefix: "自动补充",
   last_active: 6,
   last_created: 2,
@@ -36,10 +39,19 @@ const aliasAutomationFixture = {
   last_run_at: "2026-08-01T09:00:00Z",
   last_status: "success",
   max_batch_size: 5,
+  max_total_aliases: 800,
+  max_failure_count: 3,
+  daily_creation_limit: 20,
   minimum_active: 4,
   next_run_at: "2026-08-01T10:00:00Z",
   scheduled_batch_size: 2,
   target_active: 6,
+  target_created: 750,
+  created_total: 2,
+  consecutive_failure: 0,
+  pause_reason: "",
+  daily_created: 2,
+  daily_created_date: "2026-08-01",
 };
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -47,6 +59,15 @@ function jsonResponse(payload: unknown, status = 200) {
     json: async () => payload,
     ok: status >= 200 && status < 300,
     status,
+  } as Response;
+}
+
+function textResponse(body: string, status = 200) {
+  return {
+    json: async () => JSON.parse(body),
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body,
   } as Response;
 }
 
@@ -77,6 +98,52 @@ describe("API client", () => {
     expect(accounts).toEqual([accountFixture]);
     expect(accounts[0]).not.toHaveProperty("app_password");
     expect(accounts[0]).not.toHaveProperty("cookies");
+  });
+
+  it("loads privacy-safe operation log entries and strips unexpected fields", async () => {
+    const fetcher = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse({
+          data: {
+            count: 1,
+            entries: [
+              {
+                duration_ms: 842,
+                level: "info",
+                operation: "读取收件箱",
+                request_body: "must-not-reach-ui-state",
+                status: 200,
+                timestamp: "2026-08-02T08:30:00Z",
+              },
+            ],
+            retention_days: 7,
+          },
+          success: true,
+        }),
+      ),
+    );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    const logs = await client.listOperationLogs();
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/logs?limit=200",
+      expect.objectContaining({ cache: "no-store", method: "GET" }),
+    );
+    expect(logs).toEqual({
+      count: 1,
+      entries: [
+        {
+          duration_ms: 842,
+          level: "info",
+          operation: "读取收件箱",
+          status: 200,
+          timestamp: "2026-08-02T08:30:00Z",
+        },
+      ],
+      retention_days: 7,
+    });
+    expect(logs.entries[0]).not.toHaveProperty("request_body");
   });
 
   it("serializes mutation data in the JSON body and encodes dynamic path segments", async () => {
@@ -182,11 +249,18 @@ describe("API client", () => {
       client.updateAliasAutomation("account / id", {
         enabled: true,
         intervalMinutes: 60,
+        allowedWeekdays: [1, 3, 5],
+        executionWindowStart: "09:00",
+        executionWindowEnd: "17:00",
         labelPrefix: "自动补充",
         maxBatchSize: 5,
+        maxTotalAliases: 800,
+        maxFailureCount: 3,
+        dailyCreationLimit: 20,
         minimumActive: 4,
         scheduledBatchSize: 2,
         targetActive: 6,
+        targetCreated: 750,
       }),
     ).resolves.toEqual(aliasAutomationFixture);
     expect(fetcher).toHaveBeenCalledWith(
@@ -198,12 +272,102 @@ describe("API client", () => {
     expect(JSON.parse(String(requestOptions?.body))).toEqual({
       enabled: true,
       interval_minutes: 60,
+      allowed_weekdays: [1, 3, 5],
+      execution_window_start: "09:00",
+      execution_window_end: "17:00",
       label_prefix: "自动补充",
       max_batch_size: 5,
+      max_total_aliases: 800,
+      max_failure_count: 3,
+      daily_creation_limit: 20,
       minimum_active: 4,
       scheduled_batch_size: 2,
       target_active: 6,
+      target_created: 750,
     });
+  });
+
+  it("requests a read-only automation preview from the account-scoped endpoint", async () => {
+    const preview = {
+      account_id: "account / id",
+      active_aliases: 2,
+      automation: aliasAutomationFixture,
+      daily_remaining: 18,
+      max_total_aliases: 800,
+      next_eligible_at: "",
+      remaining_total_capacity: 797,
+      requested: 2,
+      schedule_allowed: true,
+      schedule_reason: "",
+      target_remaining: 748,
+      total_aliases: 3,
+    };
+    const fetcher = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse({
+          data: preview,
+          success: true,
+        }),
+      ),
+    );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await expect(client.previewAliasAutomation("account / id")).resolves.toEqual(preview);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/accounts/account%20%2F%20id/alias-automation/preview",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("retrieves retained creation history and CSV exports from account-scoped endpoints", async () => {
+    const history = {
+      account_id: "account / id",
+      count: 1,
+      entries: [
+        {
+          aliases: [
+            {
+              created_at: "2026-08-01T09:00:00Z",
+              email: "new-alias@icloud.com",
+              label: "批量 1",
+            },
+          ],
+          batch_id: "batch_123",
+          complete: true,
+          created: 1,
+          created_at: "2026-08-01T09:00:00Z",
+          error: "",
+          failed: 0,
+          label_prefix: "批量",
+          requested: 1,
+          status: "success",
+          trigger: "batch",
+        },
+      ],
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ data: history, success: true }))
+      .mockResolvedValueOnce(textResponse("batch_id,email\nbatch_123,new-alias@icloud.com\n"));
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await expect(client.listAliasCreationHistory("account / id")).resolves.toEqual(history);
+    await expect(client.downloadAliasCreationHistory("account / id")).resolves.toContain(
+      "batch_123",
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/accounts/account%20%2F%20id/alias-creation-history?limit=100",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      "/api/accounts/account%20%2F%20id/alias-creation-history.csv",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Accept: "text/csv" }),
+        method: "GET",
+      }),
+    );
   });
 
   it("uses account-scoped paths for batch creation and rule execution", async () => {
@@ -262,6 +426,32 @@ describe("API client", () => {
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
       "/api/accounts/account%20%2F%20id/alias-automation/run",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("uses account-scoped pause and resume endpoints for automation rules", async () => {
+    const fetcher = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse({
+          data: aliasAutomationFixture,
+          success: true,
+        }),
+      ),
+    );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await client.pauseAliasAutomation("account / id");
+    await client.resumeAliasAutomation("account / id");
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/accounts/account%20%2F%20id/alias-automation/pause",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      "/api/accounts/account%20%2F%20id/alias-automation/resume",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -436,6 +626,69 @@ describe("API client", () => {
     expect(fetcher).toHaveBeenCalledWith(
       "/api/accounts",
       expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it("loads a lightweight inbox before requesting one encoded message preview", async () => {
+    const message = {
+      date: "2026-08-02T04:34:00+08:00",
+      from: "sender@example.com",
+      id: "7/8",
+      preview: "selected message body",
+      subject: "Message subject",
+      to: "alias@icloud.com",
+    };
+    const fetcher = vi.fn((url: string) =>
+      Promise.resolve(
+        jsonResponse({
+          data: url.includes("/messages/")
+            ? message
+            : {
+                account_id: "acc_main",
+                alias: "",
+                count: 1,
+                messages: [{ ...message, id: "7", preview: "" }],
+                method: "imap",
+              },
+          success: true,
+        }),
+      ),
+    );
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await client.listInbox({ accountId: "acc_main", days: 7, limit: 20 });
+    await client.getInboxMessage("account / id", "7/8");
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/inbox?account_id=acc_main&days=7&include_preview=false&limit=20",
+    );
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/api/inbox/messages/7%2F8?account_id=account+%2F+id");
+  });
+
+  it("sends the inbox cursor only when loading an older page", async () => {
+    const fetcher = vi.fn((url: string) => {
+      void url;
+      return Promise.resolve(
+        jsonResponse({
+          data: {
+            account_id: "acc_main",
+            alias: "",
+            count: 0,
+            has_more: false,
+            messages: [],
+            method: "imap",
+            next_cursor: "",
+          },
+          success: true,
+        }),
+      );
+    });
+    const client = createApiClient({ fetch: fetcher as unknown as typeof fetch });
+
+    await client.listInbox({ accountId: "acc_main", beforeUid: "1040" });
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/inbox?account_id=acc_main&before_uid=1040&include_preview=false",
     );
   });
 

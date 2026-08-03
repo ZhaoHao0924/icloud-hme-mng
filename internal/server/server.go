@@ -10,7 +10,7 @@ package server
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -24,22 +24,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"icloud-hme/internal/account"
+	"icloud-hme/internal/auditlog"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
+	"icloud-hme/internal/notification"
+	"icloud-hme/internal/platformauth"
 	"icloud-hme/internal/webui"
 )
 
 const (
-	maxRequestBodyBytes   int64 = 1 << 20
-	minInboxLimit               = 1
-	maxInboxLimit               = 100
-	defaultInboxLimit           = 20
-	minInboxDays                = 1
-	maxInboxDays                = 365
-	defaultInboxDays            = 7
-	maxAliasLabelRunes          = 200
-	defaultServiceVersion       = "dev"
-	apiTokenInvalidCode         = "api_token_invalid"
+	maxRequestBodyBytes      int64 = 1 << 20
+	minInboxLimit                  = 1
+	maxInboxLimit                  = 100
+	defaultInboxLimit              = 20
+	minInboxDays                   = 1
+	maxInboxDays                   = 365
+	defaultInboxDays               = 7
+	maxAliasLabelRunes             = 200
+	defaultAliasHistoryLimit       = 100
+	defaultServiceVersion          = "dev"
+	apiTokenInvalidCode            = "api_token_invalid"
 )
 
 // Server 封装 Gin 引擎和账号管理器。
@@ -50,19 +54,49 @@ type Server struct {
 	apiTokenHash        [sha256.Size]byte
 	version             string
 	loginChallenges     *loginChallengeStore
+	inboxIMAPSessions   *inboxIMAPSessionPool
+	inboxPreviews       *inboxPreviewCache
+	newInboxIMAPClient  func(accountID string) (inboxIMAPClient, error)
 	startPasswordLogin  startPasswordLoginFunc
 	verifyPasswordLogin verifyPasswordLoginFunc
 	aliasOperations     *aliasOperationService
 	aliasAutomation     *aliasAutomationService
+	operationLogs       *auditlog.Store
+	notifications       *notification.Notifier
+	webhooks            *notification.WebhookNotifier
+	platformAuth        *platformauth.Store
+	platformSessions    *platformSessionStore
 }
 
 // New 创建 Server。apiToken 非空时,所有 /api 路由都需要 Bearer Token。
 func New(mgr *account.Manager, debug bool, apiToken string) *Server {
-	return NewWithVersion(mgr, debug, apiToken, defaultServiceVersion)
+	s, err := newServer(mgr, debug, apiToken, defaultServiceVersion, false)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // NewWithVersion 创建带显式构建版本的 Server。
 func NewWithVersion(mgr *account.Manager, debug bool, apiToken, version string) *Server {
+	s, err := newServer(mgr, debug, apiToken, version, false)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// NewWithPlatformAuth creates the production server with browser login protection enabled.
+func NewWithPlatformAuth(mgr *account.Manager, debug bool, apiToken, version string) (*Server, error) {
+	return newServer(mgr, debug, apiToken, version, true)
+}
+
+func newServer(
+	mgr *account.Manager,
+	debug bool,
+	apiToken, version string,
+	enablePlatformAuth bool,
+) (*Server, error) {
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -70,11 +104,52 @@ func NewWithVersion(mgr *account.Manager, debug bool, apiToken, version string) 
 	if version == "" {
 		version = defaultServiceVersion
 	}
+	operationLogs, _ := auditlog.New(mgr.DataDir())
+	notifications, err := notification.New(mgr.DataDir())
+	if err != nil {
+		if operationLogs != nil {
+			operationLogs.Close()
+		}
+		return nil, fmt.Errorf("initialize 163 email notifications: %w", err)
+	}
+	webhooks, err := notification.NewWebhook(mgr.DataDir())
+	if err != nil {
+		if operationLogs != nil {
+			operationLogs.Close()
+		}
+		notifications.Close()
+		return nil, fmt.Errorf("initialize webhook notifications: %w", err)
+	}
+	var authStore *platformauth.Store
+	if enablePlatformAuth {
+		var err error
+		authStore, err = platformauth.NewStore(mgr.DataDir())
+		if err != nil {
+			if operationLogs != nil {
+				operationLogs.Close()
+			}
+			notifications.Close()
+			webhooks.Close()
+			return nil, fmt.Errorf("initialize platform authentication: %w", err)
+		}
+	}
 	s := &Server{
-		mgr:             mgr,
-		authEnabled:     apiToken != "",
-		version:         version,
-		loginChallenges: newLoginChallengeStore(),
+		mgr:               mgr,
+		authEnabled:       apiToken != "",
+		version:           version,
+		loginChallenges:   newLoginChallengeStore(),
+		inboxIMAPSessions: newInboxIMAPSessionPool(),
+		inboxPreviews:     newInboxPreviewCache(),
+		operationLogs:     operationLogs,
+		notifications:     notifications,
+		webhooks:          webhooks,
+		platformAuth:      authStore,
+	}
+	if authStore != nil {
+		s.platformSessions = newPlatformSessionStore()
+	}
+	s.newInboxIMAPClient = func(accountID string) (inboxIMAPClient, error) {
+		return mgr.MailClient(accountID)
 	}
 	s.startPasswordLogin = mgr.StartPasswordLogin
 	s.verifyPasswordLogin = func(session *account.PasswordLoginSession, otp string) (account.AccountDTO, error) {
@@ -82,14 +157,16 @@ func NewWithVersion(mgr *account.Manager, debug bool, apiToken, version string) 
 	}
 	s.aliasOperations = newAliasOperationService(mgr)
 	s.aliasAutomation = newAliasAutomationService(mgr, s.aliasOperations)
+	s.aliasAutomation.onScheduledRun = s.recordScheduledAliasAutomationRun
+	s.aliasAutomation.onRun = s.notifyAliasAutomationRun
 	if s.authEnabled {
 		s.apiTokenHash = sha256.Sum256([]byte(apiToken))
 	}
-	s.r = gin.Default() // 自带 Logger + Recovery 中间件
-	s.r.Use(securityResponseHeaders)
+	s.r = gin.New()
+	s.r.Use(gin.Recovery(), securityResponseHeaders, s.operationLogMiddleware)
 	s.register()
 	s.aliasAutomation.Start()
-	return s
+	return s, nil
 }
 
 // Run 启动 HTTP 服务。
@@ -105,44 +182,82 @@ func (s *Server) Close() {
 	if s.aliasAutomation != nil {
 		s.aliasAutomation.Stop()
 	}
+	if s.aliasOperations != nil {
+		s.aliasOperations.close()
+	}
+	s.inboxIMAPSessions.Clear()
+	s.inboxPreviews.Clear()
+	if s.platformSessions != nil {
+		s.platformSessions.Clear()
+	}
+	if s.operationLogs != nil {
+		s.operationLogs.Close()
+	}
+	if s.notifications != nil {
+		s.notifications.Close()
+	}
+	if s.webhooks != nil {
+		s.webhooks.Close()
+	}
 }
 
 func (s *Server) register() {
 	api := s.r.Group("/api")
-	api.Use(noStoreAPIResponses)
-	if s.authEnabled {
-		api.Use(s.requireAPIToken)
+	api.Use(noStoreAPIResponses, limitRequestBody)
+	platformAuth := api.Group("/auth")
+	{
+		platformAuth.GET("/session", s.platformAuthSession)
+		platformAuth.POST("/setup", s.setupPlatformAuth)
+		platformAuth.POST("/login", s.loginPlatform)
+		platformAuth.POST("/logout", s.logoutPlatform)
 	}
-	api.Use(limitRequestBody)
+
+	protected := api.Group("")
+	if s.authEnabled || s.platformAuth != nil {
+		protected.Use(s.requirePlatformAccess)
+	}
 	{
 		// ===== 账号管理 =====
-		api.GET("/accounts", s.listAccounts)
-		api.POST("/accounts", s.addAccount)
-		api.DELETE("/accounts/:id", s.removeAccount)
-		api.POST("/accounts/:id/password", s.setAppPassword)
-		api.PUT("/accounts/:id/cookies", s.updateCookies)
-		api.POST("/accounts/:id/login/start", s.startAccountLogin)
-		api.POST("/accounts/:id/login/verify", s.verifyAccountLogin)
-		api.GET("/accounts/:id/alias-automation", s.getAliasAutomation)
-		api.PUT("/accounts/:id/alias-automation", s.updateAliasAutomation)
-		api.POST("/accounts/:id/alias-automation/run", s.runAliasAutomation)
-		api.POST("/accounts/:id/aliases/batch", s.createAliasesBatch)
+		protected.GET("/accounts", s.listAccounts)
+		protected.POST("/accounts", s.addAccount)
+		protected.DELETE("/accounts/:id", s.removeAccount)
+		protected.POST("/accounts/:id/password", s.setAppPassword)
+		protected.PUT("/accounts/:id/cookies", s.updateCookies)
+		protected.POST("/accounts/:id/login/start", s.startAccountLogin)
+		protected.POST("/accounts/:id/login/verify", s.verifyAccountLogin)
+		protected.GET("/accounts/:id/alias-automation", s.getAliasAutomation)
+		protected.PUT("/accounts/:id/alias-automation", s.updateAliasAutomation)
+		protected.POST("/accounts/:id/alias-automation/pause", s.pauseAliasAutomation)
+		protected.POST("/accounts/:id/alias-automation/resume", s.resumeAliasAutomation)
+		protected.POST("/accounts/:id/alias-automation/preview", s.previewAliasAutomation)
+		protected.POST("/accounts/:id/alias-automation/run", s.runAliasAutomation)
+		protected.GET("/accounts/:id/alias-creation-history", s.listAliasCreationHistory)
+		protected.GET("/accounts/:id/alias-creation-history.csv", s.exportAliasCreationHistoryCSV)
+		protected.POST("/accounts/:id/aliases/batch", s.createAliasesBatch)
 
 		// ===== 核心接口 1: 创建邮箱 =====
-		api.POST("/create", s.createAlias)
+		protected.POST("/create", s.createAlias)
 
 		// ===== 核心接口 2: 读取邮件 =====
-		api.GET("/inbox", s.listInbox)
+		protected.GET("/inbox", s.listInbox)
+		protected.GET("/inbox/messages/:id", s.getInboxMessage)
 
 		// ===== 别名管理 =====
-		api.GET("/aliases", s.listAliases)
-		api.POST("/aliases/:id/deactivate", s.deactivateAlias)
-		api.POST("/aliases/:id/reactivate", s.reactivateAlias)
-		api.DELETE("/aliases/:id", s.deleteAlias)
+		protected.GET("/aliases", s.listAliases)
+		protected.POST("/aliases/:id/deactivate", s.deactivateAlias)
+		protected.POST("/aliases/:id/reactivate", s.reactivateAlias)
+		protected.DELETE("/aliases/:id", s.deleteAlias)
 
 		// ===== 系统 =====
-		api.GET("/health", s.health)
-		api.POST("/reload", s.reloadConfig)
+		protected.GET("/health", s.health)
+		protected.GET("/logs", s.listOperationLogs)
+		protected.GET("/notifications/email", s.getEmailNotification)
+		protected.PUT("/notifications/email", s.updateEmailNotification)
+		protected.POST("/notifications/email/test", s.testEmailNotification)
+		protected.GET("/notifications/webhook", s.getWebhookNotification)
+		protected.PUT("/notifications/webhook", s.updateWebhookNotification)
+		protected.POST("/notifications/webhook/test", s.testWebhookNotification)
+		protected.POST("/reload", s.reloadConfig)
 	}
 
 	staticHandler := http.FileServer(http.FS(webui.Assets()))
@@ -234,23 +349,11 @@ func limitRequestBody(c *gin.Context) {
 }
 
 func (s *Server) requireAPIToken(c *gin.Context) {
-	parts := strings.Fields(c.GetHeader("Authorization"))
-	valid := len(parts) == 2 && strings.EqualFold(parts[0], "Bearer")
-	if valid {
-		providedHash := sha256.Sum256([]byte(parts[1]))
-		valid = subtle.ConstantTimeCompare(providedHash[:], s.apiTokenHash[:]) == 1
-	}
-	if !valid {
-		c.Header("WWW-Authenticate", "Bearer")
-		c.Header("Cache-Control", "no-store")
-		c.AbortWithStatusJSON(http.StatusUnauthorized, apiResp{
-			Success: false,
-			Code:    apiTokenInvalidCode,
-			Message: "API 访问令牌无效或缺失",
-		})
+	if s.hasValidAPIToken(c) {
+		c.Next()
 		return
 	}
-	c.Next()
+	s.abortAPIToken(c)
 }
 
 // ---- 统一响应 ----
@@ -267,7 +370,7 @@ func ok(c *gin.Context, data interface{}) {
 }
 
 func fail(c *gin.Context, code int, msg string) {
-	c.JSON(code, apiResp{Success: false, Message: msg})
+	failWithCode(c, code, "", msg)
 }
 
 func requestBodyTooLargeMessage() string {
@@ -313,6 +416,32 @@ func boundedIntQuery(c *gin.Context, name string, defaultValue, minValue, maxVal
 	return value, true
 }
 
+func boolQuery(c *gin.Context, name string, defaultValue bool) (bool, bool) {
+	raw, exists := c.GetQuery(name)
+	if !exists || strings.TrimSpace(raw) == "" {
+		return defaultValue, true
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: "+name+" 必须是 true 或 false")
+		return false, false
+	}
+	return value, true
+}
+
+func positiveUint32Query(c *gin.Context, name string) (uint32, bool) {
+	raw, exists := c.GetQuery(name)
+	if !exists || strings.TrimSpace(raw) == "" {
+		return 0, true
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 32)
+	if err != nil || value == 0 {
+		fail(c, http.StatusBadRequest, "参数错误: "+name+" 必须是正整数")
+		return 0, false
+	}
+	return uint32(value), true
+}
+
 func failAccountOperation(c *gin.Context, fallbackStatus int, prefix string, err error) {
 	if errors.Is(err, account.ErrPersistence) {
 		fallbackStatus = http.StatusInternalServerError
@@ -356,19 +485,61 @@ func (s *Server) createAlias(c *gin.Context) {
 		result, createErr = client.CreateAlias(req.Label, 5)
 		return createErr
 	})
+	if errors.Is(err, account.ErrAccountNotFound) {
+		fail(c, http.StatusNotFound, err.Error())
+		return
+	}
+	created := createdAliasData{AccountID: req.AccountID}
+	if result != nil {
+		created.CreatedAt = result.CreatedAt
+		created.Email = result.Email
+		created.Label = result.Label
+	}
+	status := account.AliasAutomationStatusSuccess
+	complete := true
+	failed := 0
+	if err != nil {
+		complete = false
+		failed = 1
+		status = account.AliasAutomationStatusError
+		if result != nil {
+			status = account.AliasAutomationStatusPartial
+		}
+	}
+	historyError := ""
+	if err != nil {
+		historyError = aliasOperationErrorSummary(err)
+	}
+	historyAliases := make([]createdAliasData, 0, 1)
+	if result != nil {
+		historyAliases = append(historyAliases, created)
+	}
+	history, historyErr := s.aliasOperations.recordAliasCreation(req.AccountID, account.AliasCreationHistory{
+		Aliases:     aliasCreationHistoryAliases(historyAliases),
+		Complete:    complete,
+		Created:     len(historyAliases),
+		Error:       historyError,
+		Failed:      failed,
+		LabelPrefix: req.Label,
+		Requested:   1,
+		Status:      status,
+		Trigger:     account.AliasCreationTriggerManual,
+	}, time.Now())
+	if historyErr != nil {
+		failAccountOperation(c, http.StatusInternalServerError, "保存别名创建历史失败: ", historyErr)
+		return
+	}
+	created.BatchID = history.BatchID
 
 	if err != nil {
 		if errors.Is(err, account.ErrPersistence) {
 			fail(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: "+err.Error())
 			return
 		}
-		if errors.Is(err, account.ErrAccountNotFound) {
-			fail(c, http.StatusNotFound, err.Error())
-			return
-		}
 		// 区分会话失效(需重新登录)与临时失败
 		msg := err.Error()
 		if isSessionError(msg) {
+			s.notifySessionExpired(req.AccountID)
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
 		} else {
 			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
@@ -376,17 +547,12 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
-	ok(c, createdAliasData{
-		AccountID: req.AccountID,
-		CreatedAt: result.CreatedAt,
-		Email:     result.Email,
-		Label:     result.Label,
-	})
+	ok(c, created)
 }
 
 // ====================================================================
 // 核心接口 2: 读取邮件
-//   GET /api/inbox?account_id=acc_xxx[&alias=xxx@icloud.com][&limit=20][&days=7]
+//   GET /api/inbox?account_id=acc_xxx[&alias=xxx@icloud.com][&limit=20][&days=7][&before_uid=123]
 //
 //   - 不传 alias: 返回该账号收件箱最近邮件
 //   - 传 alias:   只返回发给该 HME 别名的邮件
@@ -411,30 +577,42 @@ func (s *Server) listInbox(c *gin.Context) {
 	if !valid {
 		return
 	}
+	beforeUID, valid := positiveUint32Query(c, "before_uid")
+	if !valid {
+		return
+	}
+	includePreview, valid := boolQuery(c, "include_preview", true)
+	if !valid {
+		return
+	}
+	firstPreview, valid := boolQuery(c, "first_preview", false)
+	if !valid {
+		return
+	}
 
-	// 优先使用 IMAP (App Password 认证)
-	mc, err := s.mgr.MailClient(accountID)
-	if err == nil {
-		if connErr := mc.Connect(); connErr == nil {
-			defer mc.Disconnect()
-			var messages []mail.Message
-			if alias != "" {
-				messages, err = mc.FindByRecipient(alias, limit, days)
+	// 优先使用 IMAP (App Password 认证)。成功连接会在短时间内按账号复用。
+	var page mail.MessagePage
+	var imapOperationErr error
+	err := s.withInboxIMAPClient(accountID, func(mc inboxIMAPClient) error {
+		if alias != "" {
+			if includePreview {
+				page, imapOperationErr = mc.FindByRecipientPage(alias, limit, days, beforeUID)
 			} else {
-				messages, err = mc.ListInbox(limit, days)
+				page, imapOperationErr = mc.FindByRecipientSummariesPage(alias, limit, days, beforeUID)
 			}
-			if err == nil {
-				ok(c, gin.H{
-					"account_id": accountID,
-					"alias":      alias,
-					"count":      len(messages),
-					"messages":   messages,
-					"method":     "imap",
-				})
-				return
-			}
-			// IMAP 失败，继续尝试 Web API
+		} else if includePreview {
+			page, imapOperationErr = mc.ListInboxPage(limit, days, beforeUID)
+		} else {
+			page, imapOperationErr = mc.ListInboxSummariesPage(limit, days, beforeUID)
 		}
+		if imapOperationErr == nil && firstPreview && !includePreview {
+			s.loadFirstInboxPreview(accountID, page.Messages, mc)
+		}
+		return imapOperationErr
+	})
+	if err == nil {
+		ok(c, inboxPageData(accountID, alias, page, "imap"))
+		return
 	}
 
 	// 回退到 Web API (Cookie 认证，无需 App Password)
@@ -443,38 +621,132 @@ func (s *Server) listInbox(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "无可用邮件客户端: 需要 App Password 或 Cookie")
 		return
 	}
+	if beforeUID > 0 {
+		fail(c, http.StatusBadRequest, "当前 Web API 回退不支持继续加载，请配置 App Password 后重试")
+		return
+	}
 
+	var messages []mail.Message
 	if alias != "" {
-		messages, err := wmc.FindByAlias(alias, limit)
+		messages, err = wmc.FindByAlias(alias, limit)
 		if err != nil {
-			failInboxRead(c, err)
+			s.failInboxRead(c, accountID, err)
 			return
 		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"alias":      alias,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
+		ok(c, inboxPageData(accountID, alias, mail.MessagePage{Messages: messages}, "web_api"))
 	} else {
-		messages, err := wmc.ListInbox(limit)
+		messages, err = wmc.ListInbox(limit)
 		if err != nil {
-			failInboxRead(c, err)
+			s.failInboxRead(c, accountID, err)
 			return
 		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
+		ok(c, inboxPageData(accountID, alias, mail.MessagePage{Messages: messages}, "web_api"))
 	}
 }
 
-func failInboxRead(c *gin.Context, err error) {
+func inboxPageData(accountID, alias string, page mail.MessagePage, method string) gin.H {
+	nextCursor := ""
+	if page.NextBeforeUID > 0 {
+		nextCursor = strconv.FormatUint(uint64(page.NextBeforeUID), 10)
+	}
+	return gin.H{
+		"account_id":  accountID,
+		"alias":       alias,
+		"count":       len(page.Messages),
+		"has_more":    nextCursor != "",
+		"messages":    page.Messages,
+		"method":      method,
+		"next_cursor": nextCursor,
+	}
+}
+
+func (s *Server) withInboxIMAPClient(accountID string, operation func(inboxIMAPClient) error) error {
+	return s.inboxIMAPSessions.Use(accountID, func() (inboxIMAPClient, error) {
+		if s.newInboxIMAPClient == nil {
+			return nil, errors.New("IMAP 客户端工厂不可用")
+		}
+		return s.newInboxIMAPClient(accountID)
+	}, operation)
+}
+
+type inboxPreviewLoader interface {
+	GetPreview(uid uint32) (*mail.Message, error)
+}
+
+// loadFirstInboxPreview reuses the list request's authenticated IMAP session.
+// Preview failures are intentionally ignored so a slow or malformed message cannot fail the list.
+func (s *Server) loadFirstInboxPreview(accountID string, messages []mail.Message, loader inboxPreviewLoader) {
+	if len(messages) == 0 {
+		return
+	}
+	first := &messages[0]
+	if cached, found := s.inboxPreviews.Get(accountID, first.ID); found {
+		first.Preview = cached.Preview
+		return
+	}
+	uid, err := strconv.ParseUint(first.ID, 10, 32)
+	if err != nil || uid == 0 {
+		return
+	}
+	if loader == nil {
+		return
+	}
+	message, err := loader.GetPreview(uint32(uid))
+	if err != nil || message == nil {
+		return
+	}
+	*first = *message
+	s.inboxPreviews.Set(accountID, *message)
+}
+
+// getInboxMessage 按 IMAP UID 读取单封邮件预览，供轻量列表按需加载正文。
+func (s *Server) getInboxMessage(c *gin.Context) {
+	accountID := strings.TrimSpace(c.Query("account_id"))
+	if accountID == "" {
+		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		return
+	}
+	uid, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || uid == 0 {
+		fail(c, http.StatusBadRequest, "参数错误: id 必须是有效的邮件 UID")
+		return
+	}
+	messageID := strconv.FormatUint(uid, 10)
+	if message, found := s.inboxPreviews.Get(accountID, messageID); found {
+		ok(c, message)
+		return
+	}
+
+	var message *mail.Message
+	var imapOperationErr error
+	err = s.withInboxIMAPClient(accountID, func(mc inboxIMAPClient) error {
+		message, imapOperationErr = mc.GetPreview(uint32(uid))
+		if imapOperationErr == nil && message == nil {
+			imapOperationErr = errors.New("IMAP 未返回邮件内容")
+		}
+		return imapOperationErr
+	})
+	if err != nil {
+		var factoryErr *inboxIMAPClientFactoryError
+		if errors.As(err, &factoryErr) {
+			fail(c, http.StatusBadRequest, "无可用 IMAP 客户端: "+err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "邮件不存在") {
+			fail(c, http.StatusNotFound, err.Error())
+			return
+		}
+		fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+		return
+	}
+	s.inboxPreviews.Set(accountID, *message)
+	ok(c, message)
+}
+
+func (s *Server) failInboxRead(c *gin.Context, accountID string, err error) {
 	msg := err.Error()
 	if isSessionError(msg) {
+		s.notifySessionExpired(accountID)
 		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
 		return
 	}
@@ -522,6 +794,9 @@ func (s *Server) removeAccount(c *gin.Context) {
 		return
 	}
 	s.loginChallenges.invalidateAccount(id)
+	s.aliasOperations.invalidateAccount(id)
+	s.inboxIMAPSessions.InvalidateAccount(id)
+	s.inboxPreviews.InvalidateAccount(id)
 	ok(c, gin.H{"id": id})
 }
 
@@ -541,6 +816,8 @@ func (s *Server) setAppPassword(c *gin.Context) {
 		failAccountOperation(c, http.StatusBadRequest, "", err)
 		return
 	}
+	s.inboxIMAPSessions.InvalidateAccount(id)
+	s.inboxPreviews.InvalidateAccount(id)
 	ok(c, acc)
 }
 
@@ -563,17 +840,25 @@ func (s *Server) updateCookies(c *gin.Context) {
 		failAccountOperation(c, http.StatusBadRequest, "", err)
 		return
 	}
+	s.aliasOperations.invalidateAccount(id)
 	ok(c, acc)
 }
 
 type aliasAutomationReq struct {
-	Enabled            bool   `json:"enabled"`
-	IntervalMinutes    int    `json:"interval_minutes"`
-	ScheduledBatchSize int    `json:"scheduled_batch_size"`
-	MinimumActive      int    `json:"minimum_active"`
-	TargetActive       int    `json:"target_active"`
-	MaxBatchSize       int    `json:"max_batch_size"`
-	LabelPrefix        string `json:"label_prefix"`
+	Enabled              bool   `json:"enabled"`
+	IntervalMinutes      int    `json:"interval_minutes"`
+	AllowedWeekdays      []int  `json:"allowed_weekdays"`
+	ExecutionWindowStart string `json:"execution_window_start"`
+	ExecutionWindowEnd   string `json:"execution_window_end"`
+	ScheduledBatchSize   int    `json:"scheduled_batch_size"`
+	MinimumActive        int    `json:"minimum_active"`
+	TargetActive         int    `json:"target_active"`
+	MaxBatchSize         int    `json:"max_batch_size"`
+	MaxTotalAliases      int    `json:"max_total_aliases"`
+	MaxFailureCount      int    `json:"max_failure_count"`
+	DailyCreationLimit   int    `json:"daily_creation_limit"`
+	TargetCreated        int    `json:"target_created"`
+	LabelPrefix          string `json:"label_prefix"`
 }
 
 func (s *Server) getAliasAutomation(c *gin.Context) {
@@ -595,13 +880,20 @@ func (s *Server) updateAliasAutomation(c *gin.Context) {
 		return
 	}
 	automation, err := s.mgr.SetAliasAutomation(c.Param("id"), account.AliasAutomation{
-		Enabled:            req.Enabled,
-		IntervalMinutes:    req.IntervalMinutes,
-		ScheduledBatchSize: req.ScheduledBatchSize,
-		MinimumActive:      req.MinimumActive,
-		TargetActive:       req.TargetActive,
-		MaxBatchSize:       req.MaxBatchSize,
-		LabelPrefix:        req.LabelPrefix,
+		Enabled:              req.Enabled,
+		IntervalMinutes:      req.IntervalMinutes,
+		AllowedWeekdays:      req.AllowedWeekdays,
+		ExecutionWindowStart: req.ExecutionWindowStart,
+		ExecutionWindowEnd:   req.ExecutionWindowEnd,
+		ScheduledBatchSize:   req.ScheduledBatchSize,
+		MinimumActive:        req.MinimumActive,
+		TargetActive:         req.TargetActive,
+		MaxBatchSize:         req.MaxBatchSize,
+		MaxTotalAliases:      req.MaxTotalAliases,
+		MaxFailureCount:      req.MaxFailureCount,
+		DailyCreationLimit:   req.DailyCreationLimit,
+		TargetCreated:        req.TargetCreated,
+		LabelPrefix:          req.LabelPrefix,
 	}, time.Now())
 	if err != nil {
 		if errors.Is(err, account.ErrAccountNotFound) {
@@ -615,8 +907,40 @@ func (s *Server) updateAliasAutomation(c *gin.Context) {
 	ok(c, automation)
 }
 
+func (s *Server) pauseAliasAutomation(c *gin.Context) {
+	automation, err := s.mgr.PauseAliasAutomation(c.Param("id"), time.Now())
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusBadRequest, "暂停自动化规则失败: ", err)
+		return
+	}
+	s.aliasAutomation.Start()
+	ok(c, automation)
+}
+
+func (s *Server) resumeAliasAutomation(c *gin.Context) {
+	automation, err := s.mgr.ResumeAliasAutomation(c.Param("id"), time.Now())
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusBadRequest, "恢复自动化规则失败: ", err)
+		return
+	}
+	s.aliasAutomation.Start()
+	ok(c, automation)
+}
+
 func (s *Server) runAliasAutomation(c *gin.Context) {
 	result, err := s.aliasAutomation.RunNow(c.Param("id"))
+	if errors.Is(err, account.ErrPersistence) {
+		failAccountOperation(c, http.StatusInternalServerError, "保存自动化运行状态失败: ", err)
+		return
+	}
 	if err == nil || result.Created > 0 {
 		ok(c, result)
 		return
@@ -625,8 +949,30 @@ func (s *Server) runAliasAutomation(c *gin.Context) {
 		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
-	if errors.Is(err, account.ErrPersistence) {
-		failAccountOperation(c, http.StatusInternalServerError, "保存自动化运行状态失败: ", err)
+	if errors.Is(err, errAliasAutomationRuleMissing) {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, errAliasAutomationPaused) {
+		fail(c, http.StatusConflict, err.Error())
+		return
+	}
+	if isSessionError(err.Error()) {
+		s.notifySessionExpired(c.Param("id"))
+		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
+		return
+	}
+	fail(c, http.StatusBadGateway, "执行自动化规则失败: "+err.Error())
+}
+
+func (s *Server) previewAliasAutomation(c *gin.Context) {
+	preview, err := s.aliasAutomation.Preview(c.Param("id"))
+	if err == nil {
+		ok(c, preview)
+		return
+	}
+	if errors.Is(err, account.ErrAccountNotFound) {
+		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
 	if errors.Is(err, errAliasAutomationRuleMissing) {
@@ -634,10 +980,11 @@ func (s *Server) runAliasAutomation(c *gin.Context) {
 		return
 	}
 	if isSessionError(err.Error()) {
+		s.notifySessionExpired(c.Param("id"))
 		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
 		return
 	}
-	fail(c, http.StatusBadGateway, "执行自动化规则失败: "+err.Error())
+	fail(c, http.StatusBadGateway, "预览自动化规则失败: "+err.Error())
 }
 
 type createAliasesBatchReq struct {
@@ -660,23 +1007,136 @@ func (s *Server) createAliasesBatch(c *gin.Context) {
 	}
 
 	batch, err := s.aliasOperations.createBatch(c.Param("id"), req.Count, req.LabelPrefix)
-	if err == nil || batch.Created > 0 {
-		ok(c, batch)
-		return
-	}
 	if errors.Is(err, account.ErrAccountNotFound) {
 		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
+	status := account.AliasAutomationStatusSuccess
+	if err != nil {
+		status = account.AliasAutomationStatusError
+		if batch.Created > 0 {
+			status = account.AliasAutomationStatusPartial
+		}
+	}
+	history, historyErr := s.aliasOperations.recordAliasCreation(c.Param("id"), account.AliasCreationHistory{
+		Aliases:     aliasCreationHistoryAliases(batch.Aliases),
+		Complete:    batch.Complete,
+		Created:     batch.Created,
+		Error:       batch.Error,
+		Failed:      batch.Failed,
+		LabelPrefix: req.LabelPrefix,
+		Requested:   batch.Requested,
+		Status:      status,
+		Trigger:     account.AliasCreationTriggerBatch,
+	}, time.Now())
+	if historyErr != nil {
+		failAccountOperation(c, http.StatusInternalServerError, "保存别名创建历史失败: ", historyErr)
+		return
+	}
+	batch.BatchID = history.BatchID
+	applyAliasCreationBatchID(batch.Aliases, history.BatchID)
 	if errors.Is(err, account.ErrPersistence) {
 		failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
 		return
 	}
+	if err == nil || batch.Created > 0 {
+		ok(c, batch)
+		return
+	}
 	if isSessionError(err.Error()) {
+		s.notifySessionExpired(c.Param("id"))
 		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
 		return
 	}
 	fail(c, http.StatusBadGateway, "批量创建邮箱失败: "+err.Error())
+}
+
+type aliasCreationHistoryData struct {
+	AccountID string                         `json:"account_id"`
+	Count     int                            `json:"count"`
+	Entries   []account.AliasCreationHistory `json:"entries"`
+}
+
+func (s *Server) listAliasCreationHistory(c *gin.Context) {
+	limit, valid := boundedIntQuery(c, "limit", defaultAliasHistoryLimit, 1, account.MaxAliasCreationHistory)
+	if !valid {
+		return
+	}
+	entries, err := s.mgr.ListAliasCreationHistory(c.Param("id"), limit)
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusInternalServerError, "读取别名创建历史失败: ", err)
+		return
+	}
+	ok(c, aliasCreationHistoryData{
+		AccountID: c.Param("id"),
+		Count:     len(entries),
+		Entries:   entries,
+	})
+}
+
+func (s *Server) exportAliasCreationHistoryCSV(c *gin.Context) {
+	entries, err := s.mgr.ListAliasCreationHistory(c.Param("id"), account.MaxAliasCreationHistory)
+	if err != nil {
+		if errors.Is(err, account.ErrAccountNotFound) {
+			fail(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		failAccountOperation(c, http.StatusInternalServerError, "导出别名创建历史失败: ", err)
+		return
+	}
+
+	c.Header("Content-Disposition", `attachment; filename="alias-creation-history.csv"`)
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write([]byte{0xef, 0xbb, 0xbf})
+	writer := csv.NewWriter(c.Writer)
+	_ = writer.Write([]string{
+		"batch_id",
+		"created_at",
+		"trigger",
+		"status",
+		"requested",
+		"created",
+		"failed",
+		"complete",
+		"label_prefix",
+		"error",
+		"email",
+		"alias_label",
+		"alias_created_at",
+	})
+	for _, entry := range entries {
+		if len(entry.Aliases) == 0 {
+			_ = writer.Write(aliasCreationHistoryCSVRow(entry, account.AliasCreationHistoryAlias{}))
+			continue
+		}
+		for _, alias := range entry.Aliases {
+			_ = writer.Write(aliasCreationHistoryCSVRow(entry, alias))
+		}
+	}
+	writer.Flush()
+}
+
+func aliasCreationHistoryCSVRow(entry account.AliasCreationHistory, alias account.AliasCreationHistoryAlias) []string {
+	return []string{
+		entry.BatchID,
+		entry.CreatedAt,
+		entry.Trigger,
+		entry.Status,
+		strconv.Itoa(entry.Requested),
+		strconv.Itoa(entry.Created),
+		strconv.Itoa(entry.Failed),
+		strconv.FormatBool(entry.Complete),
+		entry.LabelPrefix,
+		entry.Error,
+		alias.Email,
+		alias.Label,
+		alias.CreatedAt,
+	}
 }
 
 func (s *Server) listAliases(c *gin.Context) {
@@ -701,11 +1161,17 @@ func (s *Server) listAliases(c *gin.Context) {
 			return
 		}
 		if isSessionError(err.Error()) {
+			s.notifySessionExpired(accountID)
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
 		} else {
 			fail(c, http.StatusBadGateway, err.Error())
 		}
 		return
+	}
+	history, historyErr := s.mgr.ListAliasCreationHistory(accountID, account.MaxAliasCreationHistory)
+	if historyErr == nil {
+		applyAliasCreationHistory(aliases, history)
+		hme.SortAliasesByCreatedAt(aliases)
 	}
 	ok(c, gin.H{
 		"account_id": accountID,
@@ -814,7 +1280,10 @@ func (s *Server) reloadConfig(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "重新加载配置失败: "+err.Error())
 		return
 	}
+	s.aliasOperations.invalidateAll()
 	s.loginChallenges.invalidateAll()
+	s.inboxIMAPSessions.Clear()
+	s.inboxPreviews.Clear()
 	s.aliasAutomation.Start()
 	ok(c, gin.H{"message": "配置已重新加载"})
 }

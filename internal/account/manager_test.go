@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -763,8 +764,8 @@ func TestAliasAutomationPersistsConfigurationAndRunStatus(t *testing.T) {
 	if run.LastStatus != AliasAutomationStatusPartial || run.LastActive != 3 || run.LastCreated != 4 {
 		t.Errorf("unexpected run status: %+v", run)
 	}
-	if run.NextRunAt != runAt.Add(30*time.Minute).Format(time.RFC3339) {
-		t.Errorf("run NextRunAt = %q, want %q", run.NextRunAt, runAt.Add(30*time.Minute).Format(time.RFC3339))
+	if run.NextRunAt != runAt.Add(60*time.Minute).Format(time.RFC3339) {
+		t.Errorf("run NextRunAt = %q, want %q", run.NextRunAt, runAt.Add(60*time.Minute).Format(time.RFC3339))
 	}
 
 	if err := mgr.Reload(); err != nil {
@@ -774,7 +775,7 @@ func TestAliasAutomationPersistsConfigurationAndRunStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAliasAutomation() error = %v", err)
 	}
-	if reloaded != run {
+	if !reflect.DeepEqual(reloaded, run) {
 		t.Errorf("reloaded automation = %+v, want %+v", reloaded, run)
 	}
 }
@@ -805,5 +806,195 @@ func TestAliasAutomationValidationAndDisabledSchedule(t *testing.T) {
 	}
 	if configured.MinimumActive != 2 || configured.TargetActive != 4 || configured.Enabled {
 		t.Errorf("unexpected stored disabled configuration: %+v", configured)
+	}
+}
+
+func TestAliasAutomationScheduleValidationAndDeferral(t *testing.T) {
+	base := DefaultAliasAutomation()
+	base.Enabled = true
+	base.ScheduledBatchSize = 1
+	tests := []struct {
+		name string
+		edit func(*AliasAutomation)
+	}{
+		{
+			name: "weekday outside range",
+			edit: func(rule *AliasAutomation) { rule.AllowedWeekdays = []int{7} },
+		},
+		{
+			name: "duplicate weekday",
+			edit: func(rule *AliasAutomation) { rule.AllowedWeekdays = []int{1, 1} },
+		},
+		{
+			name: "partial window",
+			edit: func(rule *AliasAutomation) { rule.ExecutionWindowStart = "09:00" },
+		},
+		{
+			name: "invalid clock",
+			edit: func(rule *AliasAutomation) {
+				rule.ExecutionWindowStart = "9:00"
+				rule.ExecutionWindowEnd = "17:00"
+			},
+		},
+		{
+			name: "window cannot cross midnight",
+			edit: func(rule *AliasAutomation) {
+				rule.ExecutionWindowStart = "17:00"
+				rule.ExecutionWindowEnd = "09:00"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := base
+			test.edit(&rule)
+			if err := ValidateAliasAutomation(rule); err == nil {
+				t.Fatal("ValidateAliasAutomation() error = nil, want schedule validation error")
+			}
+		})
+	}
+
+	mgr := newManagerWithCookies(t)
+	sunday := time.Date(2026, time.August, 2, 17, 0, 0, 0, time.UTC)
+	rule := base
+	rule.AllowedWeekdays = []int{1, 2, 3, 4, 5}
+	rule.ExecutionWindowStart = "09:00"
+	rule.ExecutionWindowEnd = "17:00"
+	saved, err := mgr.SetAliasAutomation("acc_cookie", rule, sunday)
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	wantMondayStart := time.Date(2026, time.August, 3, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if saved.NextRunAt != wantMondayStart || fmt.Sprint(saved.AllowedWeekdays) != "[1 2 3 4 5]" {
+		t.Errorf("saved schedule = %+v, want next run %q", saved, wantMondayStart)
+	}
+
+	mondayAfterWindow := time.Date(2026, time.August, 3, 17, 0, 0, 0, time.UTC)
+	deferred, err := mgr.DeferAliasAutomationToNextAllowedTime("acc_cookie", mondayAfterWindow)
+	if err != nil {
+		t.Fatalf("DeferAliasAutomationToNextAllowedTime() error = %v", err)
+	}
+	wantTuesdayStart := time.Date(2026, time.August, 4, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if deferred.NextRunAt != wantTuesdayStart || deferred.LastRunAt != "" {
+		t.Errorf("deferred schedule = %+v, want next run %q without a recorded run", deferred, wantTuesdayStart)
+	}
+}
+
+func TestAliasAutomationCumulativeTargetPreservesProgressAndStops(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	now := time.Date(2026, time.August, 2, 9, 30, 0, 0, time.UTC)
+	rule := DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.IntervalMinutes = 60
+	rule.MaxBatchSize = 5
+	rule.TargetCreated = 5
+
+	if _, err := mgr.SetAliasAutomation("acc_cookie", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	partial, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 3,
+		Created:       3,
+		Status:        AliasAutomationStatusSuccess,
+	}, now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("RecordAliasAutomationRun() partial error = %v", err)
+	}
+	if partial.CreatedTotal != 3 || !partial.Enabled {
+		t.Errorf("partial progress = %+v, want created_total 3 and enabled", partial)
+	}
+
+	resaved, err := mgr.SetAliasAutomation("acc_cookie", rule, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() same target error = %v", err)
+	}
+	if resaved.CreatedTotal != 3 || !resaved.Enabled {
+		t.Errorf("same target save = %+v, want preserved progress", resaved)
+	}
+
+	completed, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 5,
+		Created:       2,
+		Status:        AliasAutomationStatusSuccess,
+	}, now.Add(15*time.Minute))
+	if err != nil {
+		t.Fatalf("RecordAliasAutomationRun() completion error = %v", err)
+	}
+	if completed.CreatedTotal != 5 || completed.Enabled || completed.NextRunAt != "" {
+		t.Errorf("completed target = %+v, want disabled rule without next run", completed)
+	}
+
+	reopened, err := mgr.SetAliasAutomation("acc_cookie", rule, now.Add(20*time.Minute))
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() completed target error = %v", err)
+	}
+	if reopened.Enabled || reopened.CreatedTotal != 5 {
+		t.Errorf("same completed target = %+v, want preserved completed progress", reopened)
+	}
+
+	newTarget := rule
+	newTarget.TargetCreated = 6
+	reset, err := mgr.SetAliasAutomation("acc_cookie", newTarget, now.Add(25*time.Minute))
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() new target error = %v", err)
+	}
+	if !reset.Enabled || reset.CreatedTotal != 0 {
+		t.Errorf("new target = %+v, want enabled rule with reset progress", reset)
+	}
+}
+
+func TestAliasAutomationFailureBackoffPausesAndResumes(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	now := time.Date(2026, time.August, 2, 9, 30, 0, 0, time.UTC)
+	rule := DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.IntervalMinutes = 30
+	rule.ScheduledBatchSize = 1
+	if _, err := mgr.SetAliasAutomation("acc_cookie", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+
+	first, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 0,
+		Error:         "创建别名失败，请稍后重试",
+		Status:        AliasAutomationStatusError,
+	}, now.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("first RecordAliasAutomationRun() error = %v", err)
+	}
+	if first.ConsecutiveFailure != 1 || !first.Enabled || first.NextRunAt != now.Add(90*time.Minute).Format(time.RFC3339) {
+		t.Errorf("first failure state = %+v, want one failure and two-interval retry", first)
+	}
+
+	second, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 0,
+		Error:         "创建别名失败，请稍后重试",
+		Status:        AliasAutomationStatusError,
+	}, now.Add(90*time.Minute))
+	if err != nil {
+		t.Fatalf("second RecordAliasAutomationRun() error = %v", err)
+	}
+	if second.ConsecutiveFailure != 2 || !second.Enabled || second.NextRunAt != now.Add(210*time.Minute).Format(time.RFC3339) {
+		t.Errorf("second failure state = %+v, want two failures and four-interval retry", second)
+	}
+
+	paused, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+		ActiveAliases: 0,
+		Error:         "创建别名失败，请稍后重试",
+		Status:        AliasAutomationStatusError,
+	}, now.Add(210*time.Minute))
+	if err != nil {
+		t.Fatalf("third RecordAliasAutomationRun() error = %v", err)
+	}
+	if paused.ConsecutiveFailure != 3 || paused.Enabled || paused.PauseReason != AliasAutomationPauseReasonFailureLimit || paused.NextRunAt != "" {
+		t.Errorf("paused failure state = %+v, want automatic failure pause", paused)
+	}
+
+	resumed, err := mgr.SetAliasAutomation("acc_cookie", rule, now.Add(220*time.Minute))
+	if err != nil {
+		t.Fatalf("SetAliasAutomation() resume error = %v", err)
+	}
+	if !resumed.Enabled || resumed.ConsecutiveFailure != 0 || resumed.PauseReason != "" || resumed.NextRunAt != now.Add(250*time.Minute).Format(time.RFC3339) {
+		t.Errorf("resumed state = %+v, want clean retry state", resumed)
 	}
 }

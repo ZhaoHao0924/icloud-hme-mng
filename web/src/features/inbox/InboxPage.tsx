@@ -1,11 +1,16 @@
-import { Globe2, Inbox, RefreshCw, Server } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { ChevronDown, Globe2, Inbox, LoaderCircle, RefreshCw, Server } from "lucide-react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useState, type InputHTMLAttributes } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 
-import { isApiError } from "../../api/client";
-import { accountsQueryOptions, aliasesQueryOptions, inboxQueryOptions } from "../../api/queries";
-import type { InboxMessage } from "../../api/schemas";
+import { getApiErrorMessage, isApiError } from "../../api/client";
+import {
+  accountsQueryOptions,
+  aliasesQueryOptions,
+  inboxInfiniteQueryOptions,
+  inboxMessageQueryOptions,
+} from "../../api/queries";
+import type { Account, InboxMessage } from "../../api/schemas";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingState } from "../../components/LoadingState";
 import { useAccountDetailContext } from "../accounts/accountDetailContext";
@@ -13,6 +18,40 @@ import { AccountRequestErrorState } from "../security/SessionRecoveryView";
 
 const dayOptions = [1, 3, 7, 14, 30] as const;
 const limitOptions = [10, 20, 50] as const;
+
+type DraftFilterInputProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "defaultValue" | "onBlur" | "onChange" | "onKeyDown" | "value"
+> & {
+  value: string;
+  onCommit: (value: string) => string | void;
+};
+
+function DraftFilterInput({ onCommit, value, ...props }: DraftFilterInputProps) {
+  const [draft, setDraft] = useState(value);
+
+  function commitDraft() {
+    const committedValue = onCommit(draft);
+    if (typeof committedValue === "string") {
+      setDraft(committedValue);
+    }
+  }
+
+  return (
+    <input
+      {...props}
+      value={draft}
+      onBlur={commitDraft}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitDraft();
+        }
+      }}
+    />
+  );
+}
 
 function parseOption<T extends readonly number[]>(
   value: string | null,
@@ -26,6 +65,10 @@ function parseOption<T extends readonly number[]>(
 function accountPath(accountId: string, search: string) {
   const suffix = search ? `?${search}` : "";
   return `/accounts/${encodeURIComponent(accountId)}/inbox${suffix}`;
+}
+
+function accountFilterValue(account: Pick<Account, "icloud_email" | "id">) {
+  return account.icloud_email.trim() || account.id;
 }
 
 function formatInboxDate(value: string) {
@@ -50,12 +93,22 @@ function readMethodMeta(method: "imap" | "web_api") {
 }
 
 function InboxMessageList({
+  canLoadMore,
+  loadMoreError,
   messages,
+  onLoadMore,
   onSelect,
+  loadingMore,
+  selectedMessagePreview,
   selectedMessageId,
 }: {
+  canLoadMore: boolean;
+  loadMoreError: unknown;
   messages: InboxMessage[];
+  onLoadMore: () => void;
   onSelect: (messageId: string) => void;
+  loadingMore: boolean;
+  selectedMessagePreview: string;
   selectedMessageId: string;
 }) {
   return (
@@ -66,6 +119,7 @@ function InboxMessageList({
       <ul aria-labelledby="inbox-message-list-title" className="inbox-message-list">
         {messages.map((message) => {
           const selected = message.id === selectedMessageId;
+          const preview = selected ? selectedMessagePreview || message.preview : message.preview;
           return (
             <li key={message.id}>
               <button
@@ -81,17 +135,51 @@ function InboxMessageList({
                 </span>
                 <strong>{messageSubject(message)}</strong>
                 <span className="inbox-message-to">收件地址：{message.to || "未知"}</span>
-                <span className="inbox-message-preview">{message.preview || "无预览内容"}</span>
+                <span className="inbox-message-preview">{preview || "正文尚未加载"}</span>
               </button>
             </li>
           );
         })}
       </ul>
+      {canLoadMore || loadMoreError ? (
+        <div className="inbox-load-more">
+          {loadMoreError ? (
+            <span className="inbox-load-more-error" role="alert">
+              {getApiErrorMessage(loadMoreError)}
+            </span>
+          ) : null}
+          {canLoadMore ? (
+            <button
+              className="button button-secondary inbox-load-more-button"
+              disabled={loadingMore}
+              type="button"
+              onClick={onLoadMore}
+            >
+              {loadingMore ? (
+                <LoaderCircle className="button-spinner" size={15} aria-hidden="true" />
+              ) : (
+                <ChevronDown size={15} aria-hidden="true" />
+              )}
+              {loadingMore ? "正在加载更多邮件" : "加载更多邮件"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function InboxPreview({ message }: { message: InboxMessage }) {
+function InboxPreview({
+  message,
+  onRetryPreview,
+  previewError,
+  previewPending,
+}: {
+  message: InboxMessage;
+  onRetryPreview: () => void;
+  previewError: unknown;
+  previewPending: boolean;
+}) {
   return (
     <section className="table-frame inbox-preview-panel" aria-labelledby="inbox-preview-title">
       <div className="inbox-preview-heading">
@@ -116,7 +204,22 @@ function InboxPreview({ message }: { message: InboxMessage }) {
       </dl>
       <div className="inbox-preview-copy">
         <span>预览</span>
-        <p>{message.preview || "无预览内容"}</p>
+        {previewPending ? (
+          <div className="inbox-preview-loading" role="status" aria-live="polite">
+            <LoaderCircle className="loading-state-icon" size={18} aria-hidden="true" />
+            <span>正在读取邮件内容</span>
+          </div>
+        ) : previewError ? (
+          <div className="inbox-preview-error" role="alert">
+            <span>{getApiErrorMessage(previewError)}</span>
+            <button className="button button-secondary" type="button" onClick={onRetryPreview}>
+              <RefreshCw size={14} aria-hidden="true" />
+              重新加载
+            </button>
+          </div>
+        ) : (
+          <p>{message.preview || "无预览内容"}</p>
+        )}
       </div>
     </section>
   );
@@ -132,34 +235,41 @@ export function InboxPage() {
   const days = parseOption(searchParams.get("days"), dayOptions, 7);
   const limit = parseOption(searchParams.get("limit"), limitOptions, 20);
   const aliases = aliasesQuery.data?.aliases ?? [];
-  const selectedAliasExists =
-    selectedAlias === "" || aliases.some(({ email }) => email === selectedAlias);
-  const inboxQueryEnabled =
-    account.id !== "" && (selectedAlias === "" || (aliasesQuery.isSuccess && selectedAliasExists));
-  const inboxQuery = useQuery({
-    ...inboxQueryOptions({ accountId: account.id, alias: selectedAlias, days, limit }),
+  const inboxQueryEnabled = account.id !== "";
+  const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const inboxQuery = useInfiniteQuery({
+    ...inboxInfiniteQueryOptions(
+      { accountId: account.id, alias: selectedAlias, days, limit },
+      { refreshKey: inboxRefreshKey },
+    ),
     enabled: inboxQueryEnabled,
   });
   const accounts = accountsQuery.data ?? [account];
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
-  const messages = inboxQuery.data?.messages ?? [];
-  const selectedMessage =
+  const inboxPages = inboxQuery.data?.pages ?? [];
+  const messages = inboxPages.flatMap((page) => page.messages);
+  const hasInboxData = inboxQuery.data !== undefined;
+  const loadMoreError = inboxQuery.isFetchNextPageError ? inboxQuery.error : null;
+  const selectedMessageSummary =
     messages.find((message) => message.id === selectedMessageId) ?? messages[0] ?? null;
-  const method = inboxQuery.data ? readMethodMeta(inboxQuery.data.method) : null;
+  const selectedMessageNeedsPreview =
+    inboxPages[0]?.method === "imap" && selectedMessageSummary?.preview === "";
+  const selectedMessageQuery = useQuery({
+    ...inboxMessageQueryOptions(account.id, selectedMessageSummary?.id ?? ""),
+    enabled: selectedMessageNeedsPreview,
+  });
+  const selectedMessage = selectedMessageNeedsPreview
+    ? (selectedMessageQuery.data ?? selectedMessageSummary)
+    : selectedMessageSummary;
+  const method = inboxPages[0] ? readMethodMeta(inboxPages[0].method) : null;
   const inboxErrorTitle =
     isApiError(inboxQuery.error) &&
     (inboxQuery.error.kind === "timeout" || inboxQuery.error.status === 504)
       ? "读取邮件超时"
       : "收件箱加载失败";
 
-  useEffect(() => {
-    if (!selectedAlias || !aliasesQuery.isSuccess || selectedAliasExists) return;
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.delete("alias");
-    setSearchParams(nextParams, { replace: true });
-  }, [aliasesQuery.isSuccess, searchParams, selectedAlias, selectedAliasExists, setSearchParams]);
-
   function updateAlias(nextAlias: string) {
+    nextAlias = nextAlias.trim();
     const nextParams = new URLSearchParams(searchParams);
     if (nextAlias) {
       nextParams.set("alias", nextAlias);
@@ -167,6 +277,7 @@ export function InboxPage() {
       nextParams.delete("alias");
     }
     setSearchParams(nextParams, { replace: true });
+    return nextAlias;
   }
 
   function updateOption(parameter: "days" | "limit", value: number, defaultValue: number) {
@@ -186,13 +297,26 @@ export function InboxPage() {
     navigate(accountPath(nextAccountId, nextParams.toString()), { replace: true });
   }
 
+  function commitAccountInput(inputValue: string) {
+    const value = inputValue.trim();
+    const matchedAccount = accounts.find(
+      (candidate) =>
+        candidate.id === value ||
+        candidate.name === value ||
+        candidate.icloud_email.toLowerCase() === value.toLowerCase(),
+    );
+    if (!matchedAccount) return accountFilterValue(account);
+    updateAccount(matchedAccount.id);
+    return accountFilterValue(matchedAccount);
+  }
+
   return (
     <section className="inbox-page" aria-labelledby="inbox-page-title">
       <div className="section-heading">
         <div>
           <h3 id="inbox-page-title">邮件收件箱</h3>
           <span className="record-count">
-            {inboxQuery.isSuccess ? `${inboxQuery.data.count} 封邮件` : "正在同步"}
+            {hasInboxData ? `${messages.length} 封邮件` : "正在同步"}
           </span>
         </div>
         <div className="inbox-heading-actions">
@@ -215,7 +339,10 @@ export function InboxPage() {
             disabled={inboxQuery.isFetching || !inboxQueryEnabled}
             title="刷新收件箱"
             type="button"
-            onClick={() => void inboxQuery.refetch()}
+            onClick={() => {
+              setSelectedMessageId(null);
+              setInboxRefreshKey((value) => value + 1);
+            }}
           >
             <RefreshCw
               className={inboxQuery.isFetching ? "button-spinner" : undefined}
@@ -229,36 +356,51 @@ export function InboxPage() {
       <div className="inbox-toolbar" aria-label="收件箱筛选">
         <div className="form-field">
           <label htmlFor="inbox-account">账户</label>
-          <select
+          <DraftFilterInput
+            key={`account-${account.id}-${accountFilterValue(account)}`}
             id="inbox-account"
-            value={account.id}
-            onChange={(event) => updateAccount(event.target.value)}
-          >
+            list="inbox-account-options"
+            value={accountFilterValue(account)}
+            autoCapitalize="none"
+            autoComplete="off"
+            inputMode="email"
+            spellCheck={false}
+            onCommit={commitAccountInput}
+          />
+          <datalist id="inbox-account-options">
             {accounts.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.name} · {candidate.icloud_email || candidate.id}
-              </option>
+              <option
+                key={candidate.id}
+                label={candidate.name}
+                value={accountFilterValue(candidate)}
+              />
             ))}
-          </select>
+          </datalist>
         </div>
 
         <div className="form-field">
           <label htmlFor="inbox-alias">别名</label>
-          <select
+          <DraftFilterInput
+            key={`alias-${selectedAlias}`}
             id="inbox-alias"
+            list="inbox-alias-options"
             value={selectedAlias}
-            disabled={aliasesQuery.isPending || aliasesQuery.isError}
-            onChange={(event) => updateAlias(event.target.value)}
-          >
-            <option value="">全部别名</option>
-            {!selectedAliasExists ? <option value={selectedAlias}>{selectedAlias}</option> : null}
+            aria-describedby="inbox-alias-help"
+            autoCapitalize="none"
+            autoComplete="off"
+            inputMode="email"
+            placeholder="全部别名或输入邮箱"
+            spellCheck={false}
+            onCommit={updateAlias}
+          />
+          <datalist id="inbox-alias-options">
             {aliases.map((alias) => (
               <option key={alias.anonymousId} value={alias.email}>
                 {alias.email}
                 {alias.label ? ` · ${alias.label}` : ""}
               </option>
             ))}
-          </select>
+          </datalist>
         </div>
 
         <div className="form-field">
@@ -290,6 +432,10 @@ export function InboxPage() {
             ))}
           </select>
         </div>
+
+        <span className="inbox-filter-help" id="inbox-alias-help">
+          别名支持从候选中选择，也可以手动输入完整邮箱；清空表示全部别名。
+        </span>
       </div>
 
       {aliasesQuery.isPending || inboxQuery.isPending ? (
@@ -307,7 +453,7 @@ export function InboxPage() {
         />
       ) : null}
 
-      {inboxQuery.isError ? (
+      {inboxQuery.isError && messages.length === 0 ? (
         <AccountRequestErrorState
           accountId={account.id}
           error={inboxQuery.error}
@@ -316,7 +462,7 @@ export function InboxPage() {
         />
       ) : null}
 
-      {!aliasesQuery.isPending && inboxQuery.isSuccess ? (
+      {!aliasesQuery.isPending && hasInboxData ? (
         <>
           {messages.length === 0 ? (
             <div className="table-frame inbox-query-state">
@@ -332,10 +478,20 @@ export function InboxPage() {
             <div className="inbox-content-grid">
               <InboxMessageList
                 messages={messages}
+                canLoadMore={inboxQuery.hasNextPage}
+                loadMoreError={loadMoreError}
+                loadingMore={inboxQuery.isFetchingNextPage}
                 selectedMessageId={selectedMessage.id}
+                selectedMessagePreview={selectedMessage.preview}
+                onLoadMore={() => void inboxQuery.fetchNextPage()}
                 onSelect={setSelectedMessageId}
               />
-              <InboxPreview message={selectedMessage} />
+              <InboxPreview
+                message={selectedMessage}
+                previewError={selectedMessageNeedsPreview ? selectedMessageQuery.error : null}
+                previewPending={selectedMessageNeedsPreview && selectedMessageQuery.isPending}
+                onRetryPreview={() => void selectedMessageQuery.refetch()}
+              />
             </div>
           ) : null}
         </>

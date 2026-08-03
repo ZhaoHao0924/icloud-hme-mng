@@ -5,6 +5,7 @@
 # Runtime data
 /data/
 /logs/
+/backups/
 
 # Environment
 /.env
@@ -18,6 +19,7 @@ docs/
 !capture_statsig_pair.js
 !capture_statsig_pair_v5.js
 # Temp / test files
+/tmp/
 /fresh-req.json
 reverse_task/
 js

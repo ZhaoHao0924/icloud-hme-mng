@@ -30,6 +30,10 @@ const sessionTrustChallengeStatus = 421
 // ErrWebRecipientUnavailable 表示 Web 邮件响应没有足够信息进行可靠的别名筛选。
 var ErrWebRecipientUnavailable = errors.New("Web 邮件响应缺少可验证的收件人")
 
+// ErrWebThreadDetailUnavailable means Apple's thread detail endpoint did not
+// allow recipient verification even though the inbox search endpoint worked.
+var ErrWebThreadDetailUnavailable = errors.New("Web 邮件详情接口不可用于验证收件人")
+
 type webHTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 	SetCookies(u *url.URL, cookies []*http.Cookie)
@@ -37,18 +41,19 @@ type webHTTPClient interface {
 
 // WebClient 是 iCloud Web 邮件客户端。
 type WebClient struct {
-	cookies       map[string]string
-	dsid          string
-	clientID      string
-	mccGatewayURL string
-	host          string // "icloud.com" 或 "icloud.com.cn"
-	httpc         webHTTPClient
+	cookies               map[string]string
+	dsid                  string
+	clientID              string
+	mccGatewayURL         string
+	host                  string // "icloud.com" 或 "icloud.com.cn"
+	httpc                 webHTTPClient
+	fetchThreadRecipients func(threadID string) ([]string, error)
 }
 
 // NewWebClient 创建一个 Web 邮件客户端。
 func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(30),
+		tls_client.WithTimeoutSeconds(60),
 		tls_client.WithClientProfile(profiles.Chrome_146),
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithNotFollowRedirects(),
@@ -71,6 +76,7 @@ func newWebClient(cookies map[string]string, dsid, host string, httpc webHTTPCli
 		host:     host,
 		httpc:    httpc,
 	}
+	c.fetchThreadRecipients = c.fetchWebThreadRecipients
 
 	if isSupportedICloudHost(host) {
 		_ = c.setCookiesForURL("https://setup." + host)
@@ -455,6 +461,52 @@ func (c *WebClient) searchInbox(query string, limit int, includeFolderStatus boo
 	return c.search(raw)
 }
 
+// fetchWebThreadRecipients pulls explicit recipients for a single thread when
+// thread/search omitted them. It never infers recipient matches from subject,
+// sender, or preview text.
+func (c *WebClient) fetchWebThreadRecipients(threadID string) ([]string, error) {
+	if err := c.resolveMccGateway(); err != nil {
+		return nil, err
+	}
+	detailURL, err := c.withParams(c.mccGatewayURL + "/mailws2/v1/thread/" + url.PathEscape(threadID))
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("GET", detailURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setCommonHeaders(req)
+
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取邮件详情失败: %w", err)
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return nil, ErrWebThreadDetailUnavailable
+	}
+	if resp.StatusCode != 200 {
+		return nil, webUpstreamError("read thread detail failed", resp.StatusCode, body)
+	}
+
+	var parsed struct {
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("解析邮件详情失败: %w", err)
+	}
+	if parsed.Success != nil && !*parsed.Success {
+		return nil, fmt.Errorf("读取邮件详情失败: %s", truncate(string(body), 300))
+	}
+	return extractWebRecipients(body), nil
+}
+
 func publicWebMessages(results []webSearchResult, limit int) []Message {
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
@@ -486,17 +538,44 @@ func (c *WebClient) FindByAlias(alias string, limit int) ([]Message, error) {
 	unknownRecipients := 0
 	alias = canonicalWebAddress(alias)
 	filtered := make([]Message, 0, limit)
+	detailFailures := 0
+	var lastDetailErr error
 	for _, result := range raw {
+		if len(filtered) >= limit {
+			break
+		}
 		if !result.recipientKnown {
-			unknownRecipients++
+			recipients, detailErr := c.fetchThreadRecipients(result.message.ID)
+			if detailErr != nil {
+				detailFailures++
+				lastDetailErr = detailErr
+				continue
+			}
+			if len(recipients) == 0 {
+				unknownRecipients++
+				continue
+			}
+			if containsWebAddress(recipients, alias) && len(filtered) < limit {
+				message := result.message
+				message.To = strings.Join(recipients, ", ")
+				filtered = append(filtered, message)
+			}
 			continue
 		}
 		if containsWebAddress(result.recipients, alias) && len(filtered) < limit {
 			filtered = append(filtered, result.message)
 		}
 	}
-	if unknownRecipients > 0 {
-		return nil, fmt.Errorf("%w: thread/search 中 %d/%d 封邮件未提供收件人", ErrWebRecipientUnavailable, unknownRecipients, len(raw))
+	if len(filtered) == 0 {
+		if unknownRecipients > 0 {
+			return nil, fmt.Errorf("%w: thread/search/thread detail 中 %d/%d 封邮件未提供收件人", ErrWebRecipientUnavailable, unknownRecipients, len(raw))
+		}
+		if detailFailures > 0 {
+			if errors.Is(lastDetailErr, ErrWebThreadDetailUnavailable) {
+				return nil, fmt.Errorf("%w: Apple Web Mail 未开放可用于别名过滤的邮件详情收件人", ErrWebRecipientUnavailable)
+			}
+			return nil, lastDetailErr
+		}
 	}
 	return filtered, nil
 }

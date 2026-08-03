@@ -209,6 +209,44 @@ func TestWebClientMapsStableMessageFieldsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestFetchWebThreadRecipientsUsesThreadDetail(t *testing.T) {
+	fakeHTTP := &fakeWebHTTPClient{responses: []*http.Response{
+		webJSONResponse(200, map[string]any{
+			"webservices": map[string]any{
+				"mccgateway": map[string]any{"url": "https://p321-mccgateway.icloud.com:443"},
+			},
+		}),
+		webJSONResponse(200, map[string]any{
+			"success": true,
+			"thread": map[string]any{
+				"messages": []any{
+					map[string]any{
+						"toRecipients": []any{
+							map[string]any{"emailAddress": "Alias@iCloud.com"},
+						},
+					},
+				},
+			},
+		}),
+	}}
+	client := newWebClient(map[string]string{"session": "secret"}, "12345", "icloud.com", fakeHTTP)
+	client.clientID = "fixed-client-id"
+
+	recipients, err := client.fetchWebThreadRecipients("thread/id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 1 || recipients[0] != "alias@icloud.com" {
+		t.Fatalf("recipients = %#v", recipients)
+	}
+	if len(fakeHTTP.requests) != 2 {
+		t.Fatalf("request count = %d, want validate and detail", len(fakeHTTP.requests))
+	}
+	if got := fakeHTTP.requests[1].URL.EscapedPath(); got != "/mailws2/v1/thread/thread%2Fid" {
+		t.Fatalf("detail path = %q", got)
+	}
+}
+
 func TestFindByAliasUsesExactRecipientOnly(t *testing.T) {
 	fake := newFakeWebMailClient(map[string]any{
 		"success": true,
@@ -233,6 +271,72 @@ func TestFindByAliasUsesExactRecipientOnly(t *testing.T) {
 	}
 }
 
+func TestFindByAliasFetchesThreadDetailWhenDigestRecipientIsMissing(t *testing.T) {
+	fake := newFakeWebMailClient(map[string]any{
+		"success": true,
+		"threadList": []any{
+			map[string]any{
+				"threadId": "detail-match", "subject": "normal", "senders": []string{"sender@example.com"},
+				"timestamp": 2,
+			},
+			map[string]any{
+				"threadId": "detail-other", "subject": "alias@icloud.com", "senders": []string{"alias@icloud.com"},
+				"timestamp": 1,
+			},
+		},
+	})
+	var fetched []string
+	fake.client.fetchThreadRecipients = func(threadID string) ([]string, error) {
+		fetched = append(fetched, threadID)
+		if threadID == "detail-match" {
+			return []string{"Alias@iCloud.com"}, nil
+		}
+		return []string{"other@icloud.com"}, nil
+	}
+
+	messages, err := fake.client.FindByAlias("alias@icloud.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != "detail-match" {
+		t.Fatalf("filtered messages = %#v", messages)
+	}
+	if messages[0].To != "Alias@iCloud.com" {
+		t.Fatalf("message To = %q, want detail recipient", messages[0].To)
+	}
+	if strings.Join(fetched, ",") != "detail-match,detail-other" {
+		t.Fatalf("detail fetches = %#v", fetched)
+	}
+}
+
+func TestFindByAliasDoesNotFetchThreadDetailAfterLimitIsReached(t *testing.T) {
+	fake := newFakeWebMailClient(map[string]any{
+		"success": true,
+		"threadList": []any{
+			map[string]any{
+				"threadId": "known-match", "subject": "normal", "senders": []string{"sender@example.com"},
+				"timestamp": 2, "to": []string{"alias@icloud.com"},
+			},
+			map[string]any{
+				"threadId": "unknown", "subject": "normal", "senders": []string{"sender@example.com"},
+				"timestamp": 1,
+			},
+		},
+	})
+	fake.client.fetchThreadRecipients = func(threadID string) ([]string, error) {
+		t.Fatalf("unexpected detail fetch for %s", threadID)
+		return nil, nil
+	}
+
+	messages, err := fake.client.FindByAlias("alias@icloud.com", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != "known-match" {
+		t.Fatalf("filtered messages = %#v", messages)
+	}
+}
+
 func TestFindByAliasFailsWhenRecipientIsUnavailable(t *testing.T) {
 	fake := newFakeWebMailClient(map[string]any{
 		"success": true,
@@ -243,10 +347,56 @@ func TestFindByAliasFailsWhenRecipientIsUnavailable(t *testing.T) {
 			},
 		},
 	})
+	fake.client.fetchThreadRecipients = func(string) ([]string, error) {
+		return nil, nil
+	}
 
 	_, err := fake.client.FindByAlias("alias@icloud.com", 10)
 	if !errors.Is(err, ErrWebRecipientUnavailable) {
 		t.Fatalf("FindByAlias() error = %v, want ErrWebRecipientUnavailable", err)
+	}
+}
+
+func TestFindByAliasMapsUnavailableThreadDetailToRecipientUnavailable(t *testing.T) {
+	fake := newFakeWebMailClient(map[string]any{
+		"success": true,
+		"threadList": []any{
+			map[string]any{
+				"threadId": "unknown", "subject": "normal", "senders": []string{"sender@example.com"},
+				"timestamp": 1,
+			},
+		},
+	})
+	fake.client.fetchThreadRecipients = func(string) ([]string, error) {
+		return nil, ErrWebThreadDetailUnavailable
+	}
+
+	_, err := fake.client.FindByAlias("alias@icloud.com", 10)
+	if !errors.Is(err, ErrWebRecipientUnavailable) {
+		t.Fatalf("FindByAlias() error = %v, want ErrWebRecipientUnavailable", err)
+	}
+	if strings.Contains(err.Error(), "403") {
+		t.Fatalf("FindByAlias() leaked HTTP 403 into session classification path: %v", err)
+	}
+}
+
+func TestFindByAliasPropagatesThreadDetailFailure(t *testing.T) {
+	fake := newFakeWebMailClient(map[string]any{
+		"success": true,
+		"threadList": []any{
+			map[string]any{
+				"threadId": "unknown", "subject": "normal", "senders": []string{"sender@example.com"},
+				"timestamp": 1,
+			},
+		},
+	})
+	fake.client.fetchThreadRecipients = func(string) ([]string, error) {
+		return nil, fmt.Errorf("detail unavailable")
+	}
+
+	_, err := fake.client.FindByAlias("alias@icloud.com", 10)
+	if err == nil || !strings.Contains(err.Error(), "detail unavailable") {
+		t.Fatalf("FindByAlias() error = %v, want detail failure", err)
 	}
 }
 

@@ -122,6 +122,9 @@ describe("SecurityPage App Password form", () => {
     const passwordInput = within(section).getByLabelText("App 专用密码");
 
     expect(within(section).getByText("未配置")).toBeInTheDocument();
+    expect(within(section).getByText(/App 专用密码未配置/)).toHaveTextContent(
+      "指定别名筛选可能不可用",
+    );
     await user.click(within(section).getByRole("button", { name: "显示 App 专用密码" }));
     expect(passwordInput).toHaveAttribute("type", "text");
     await user.type(passwordInput, "abcd-efgh-ijkl-mnop");
@@ -132,6 +135,7 @@ describe("SecurityPage App Password form", () => {
     expect(emailInput).toHaveValue("pending@icloud.com.cn");
     expect(await screen.findByRole("status")).toHaveTextContent("App 密码已验证待登录账号");
     await waitFor(() => expect(within(section).getByText("已配置")).toBeInTheDocument());
+    expect(within(section).getByText(/App 专用密码已配置/)).toHaveTextContent("优先使用 IMAP");
 
     const mutation = queryClient.getMutationCache().getAll().at(-1);
     expect(mutation?.state.variables).toBeUndefined();
