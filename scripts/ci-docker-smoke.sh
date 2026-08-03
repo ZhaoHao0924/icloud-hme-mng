@@ -44,6 +44,7 @@ wait_for_server() {
 start_container() {
   docker run --detach --rm \
     --name "$container_name" \
+    --user "$(id -u):$(id -g)" \
     --publish "127.0.0.1:18081:8081" \
     --env "ICLOUD_HME_API_TOKEN=$api_token" \
     --volume "$data_dir:/app/data" \
