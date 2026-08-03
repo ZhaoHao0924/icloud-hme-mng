@@ -29,10 +29,10 @@ jobs:
           node-version: 22.12.0
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Go static analysis and race tests
-        run: |
-          go vet ./...
-          go test -race ./...
+      - name: Go static analysis
+        run: go vet ./...
+      - name: Go race tests
+        run: go test -race ./...
       - name: Install frontend dependencies
         run: npm ci --prefix web
       - name: Frontend static checks and unit tests
