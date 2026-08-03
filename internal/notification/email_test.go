@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ func Test163ConfigurationIsPersistedAndAuthorizationCodeIsNotPublic(t *testing.T
 		t.Fatalf("public config leaked authorization code: %s", encoded)
 	}
 
-	storedPath := dataDir + "\\" + configFileName
+	storedPath := filepath.Join(dataDir, configFileName)
 	stored, err := os.ReadFile(storedPath)
 	if err != nil {
 		t.Fatalf("read stored config: %v", err)

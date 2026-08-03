@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +42,7 @@ func TestWebhookConfigurationIsPersistedAndSecretIsNotPublic(t *testing.T) {
 		t.Fatalf("public config leaked webhook secret: %s", encoded)
 	}
 
-	storedPath := dataDir + "\\" + webhookConfigFileName
+	storedPath := filepath.Join(dataDir, webhookConfigFileName)
 	stored, err := os.ReadFile(storedPath)
 	if err != nil {
 		t.Fatalf("read stored config: %v", err)
