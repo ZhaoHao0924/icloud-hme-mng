@@ -56,6 +56,8 @@ docker run -d \
 
 镜像支持 `linux/amd64` 和 `linux/arm64` 双架构，自动适配。
 
+每次 `main` 分支推送在验证和 Docker 冒烟测试通过后，GitHub Actions 会自动构建并发布 `:main` 以及对应提交的 `:sha-<commit>` 多架构镜像，可直接用于测试或快速部署。生产环境建议使用 `v*` 版本标签；版本标签会发布固定版本镜像并在稳定版本时更新 `:latest`。
+
 #### 方式三：源码编译
 
 ```bash
@@ -1352,6 +1354,8 @@ This loopback example does not need a token. If direct non-loopback access is un
 ### Docker image
 
 The published image is `ghcr.io/zhaohao0924/icloud-hme-mng` and supports `linux/amd64` and `linux/arm64`. Pin a release tag such as `v0.2.0` in production and use `latest` only when that update policy is acceptable. The container listens on `0.0.0.0:8081`, so a token of at least 32 characters is required.
+
+After verification and Docker smoke tests pass, every push to `main` publishes the multi-architecture `:main` image and a matching `:sha-<commit>` image. Use `:main` for staging or fast deployment of the current branch; pin a `v*` release tag for production. Stable release tags also update `:latest`.
 
 #### Linux/macOS shell
 
