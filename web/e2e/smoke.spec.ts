@@ -66,6 +66,44 @@ test.beforeEach(async ({ page }) => {
       status: 200,
     }),
   );
+  await page.route("**/api/logs*", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        data: { count: 0, entries: [], retention_days: 7 },
+        success: true,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+  await page.route("**/api/notifications/email", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        data: {
+          configured: false,
+          enabled: false,
+          provider: "163",
+          recipient_email: "",
+          sender_email: "",
+          smtp_host: "smtp.163.com",
+          smtp_port: 465,
+        },
+        success: true,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+  await page.route("**/api/notifications/webhook", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        data: { configured: false, enabled: false, url: "" },
+        success: true,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
   await page.route("**/api/reload", (route) =>
     route.fulfill({
       body: JSON.stringify({ data: { message: "配置已重新加载" }, success: true }),
