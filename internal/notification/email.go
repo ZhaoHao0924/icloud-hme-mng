@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"mime"
 	"net"
 	netmail "net/mail"
 	"net/smtp"
@@ -88,13 +87,13 @@ type storedConfig struct {
 }
 
 type Sender interface {
-	Send(config Config, subject, body string) error
+	Send(config Config, message Message) error
 }
 
-type SenderFunc func(config Config, subject, body string) error
+type SenderFunc func(config Config, message Message) error
 
-func (f SenderFunc) Send(config Config, subject, body string) error {
-	return f(config, subject, body)
+func (f SenderFunc) Send(config Config, message Message) error {
+	return f(config, message)
 }
 
 type smtpSender struct {
@@ -119,6 +118,7 @@ type Notifier struct {
 	queue      chan queuedEvent
 	stop       chan struct{}
 	done       chan struct{}
+	now        func() time.Time
 	retryDelay time.Duration
 	logger     func(string, ...any)
 	workerOnce sync.Once
@@ -140,6 +140,7 @@ func New(dataDir string) (*Notifier, error) {
 		queue:      make(chan queuedEvent, queueSize),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
+		now:        time.Now,
 		retryDelay: 250 * time.Millisecond,
 		logger:     log.Printf,
 	}
@@ -152,8 +153,8 @@ func New(dataDir string) (*Notifier, error) {
 
 func newNotifier(path string, config Config, sender Sender) *Notifier {
 	if sender == nil {
-		sender = SenderFunc(func(config Config, subject, body string) error {
-			return (smtpSender{dialTimeout: 15 * time.Second}).Send(config, subject, body)
+		sender = SenderFunc(func(config Config, message Message) error {
+			return (smtpSender{dialTimeout: 15 * time.Second}).Send(config, message)
 		})
 	}
 	notifier := &Notifier{
@@ -163,6 +164,7 @@ func newNotifier(path string, config Config, sender Sender) *Notifier {
 		queue:      make(chan queuedEvent, queueSize),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
+		now:        time.Now,
 		retryDelay: time.Millisecond,
 		logger:     func(string, ...any) {},
 	}
@@ -296,20 +298,27 @@ func (n *Notifier) SendTest() error {
 	if !isConfigured(config) {
 		return ErrNotConfigured
 	}
-	return n.sendWithRetry(config, "iCloud HME email notification test", "163 Mail notification configuration is active.\r\n\r\nThis message was sent by the local iCloud HME service.")
+	return n.sendWithRetry(config, renderTestMessage(config, n.currentTime()))
+}
+
+func (n *Notifier) currentTime() time.Time {
+	if n == nil || n.now == nil {
+		return time.Now()
+	}
+	return n.now()
 }
 
 func (n *Notifier) deliver(queued queuedEvent) {
-	subject, body := eventMessage(queued.event)
-	if err := n.sendWithRetry(queued.config, subject, body); err != nil && n.logger != nil {
+	message := renderEvent(queued.event, n.currentTime())
+	if err := n.sendWithRetry(queued.config, message); err != nil && n.logger != nil {
 		n.logger("email notification failed after %d attempts: %v", maxAttempts, err)
 	}
 }
 
-func (n *Notifier) sendWithRetry(config Config, subject, body string) error {
+func (n *Notifier) sendWithRetry(config Config, message Message) error {
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := n.sender.Send(config, subject, body); err == nil {
+		if err := n.sender.Send(config, message); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -488,34 +497,6 @@ func writeConfigAtomic(path string, config Config) (err error) {
 	return nil
 }
 
-func eventMessage(event Event) (string, string) {
-	kind := event.Kind
-	if kind == "" {
-		kind = "alias_automation"
-	}
-	status := event.Status
-	if status == "" {
-		status = "unknown"
-	}
-	body := strings.Builder{}
-	body.WriteString("iCloud HME 自动化通知\r\n\r\n")
-	fmt.Fprintf(&body, "事件: %s\r\n", kind)
-	fmt.Fprintf(&body, "账户: %s\r\n", redactAccountID(event.AccountID))
-	fmt.Fprintf(&body, "触发方式: %s\r\n", statusValue(event.Trigger))
-	fmt.Fprintf(&body, "状态: %s\r\n", status)
-	fmt.Fprintf(&body, "请求创建: %d\r\n", event.Requested)
-	fmt.Fprintf(&body, "成功创建: %d\r\n", event.Created)
-	fmt.Fprintf(&body, "失败数量: %d\r\n", event.Failed)
-	fmt.Fprintf(&body, "是否完成: %t\r\n", event.Complete)
-	if event.PauseReason != "" {
-		fmt.Fprintf(&body, "暂停原因: %s\r\n", event.PauseReason)
-	}
-	if event.Error != "" {
-		fmt.Fprintf(&body, "错误摘要: %s\r\n", oneLine(event.Error))
-	}
-	return "iCloud HME 自动化通知", body.String()
-}
-
 func redactAccountID(value string) string {
 	value = oneLine(value)
 	if len(value) <= 8 {
@@ -538,9 +519,13 @@ func oneLine(value string) string {
 	return value
 }
 
-func (s smtpSender) Send(config Config, subject, body string) error {
+func (s smtpSender) Send(config Config, message Message) error {
 	if s.dialTimeout <= 0 {
 		s.dialTimeout = 15 * time.Second
+	}
+	raw, err := buildMIMEMessage(config, message)
+	if err != nil {
+		return err
 	}
 	address := net.JoinHostPort(SMTPHost, fmt.Sprintf("%d", SMTPPort))
 	dialer := net.Dialer{Timeout: s.dialTimeout}
@@ -571,14 +556,7 @@ func (s smtpSender) Send(config Config, subject, body string) error {
 	if err != nil {
 		return fmt.Errorf("open 163 SMTP message: %w", err)
 	}
-	message := fmt.Sprintf(
-		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n",
-		config.SenderEmail,
-		config.RecipientEmail,
-		mime.QEncoding.Encode("UTF-8", subject),
-		strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\n", "\r\n"),
-	)
-	if _, err := writer.Write([]byte(message)); err != nil {
+	if _, err := writer.Write([]byte(raw)); err != nil {
 		_ = writer.Close()
 		return fmt.Errorf("write 163 SMTP message: %w", err)
 	}
