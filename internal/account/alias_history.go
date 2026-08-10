@@ -55,8 +55,14 @@ func cloneAliasCreationHistory(entries []AliasCreationHistory) []AliasCreationHi
 	cloned := make([]AliasCreationHistory, len(entries))
 	for index, entry := range entries {
 		cloned[index] = entry
-		cloned[index].Aliases = append([]AliasCreationHistoryAlias(nil), entry.Aliases...)
+		cloned[index].Aliases = cloneAliasCreationHistoryAliases(entry.Aliases)
 	}
+	return cloned
+}
+
+func cloneAliasCreationHistoryAliases(aliases []AliasCreationHistoryAlias) []AliasCreationHistoryAlias {
+	cloned := make([]AliasCreationHistoryAlias, len(aliases))
+	copy(cloned, aliases)
 	return cloned
 }
 
@@ -120,7 +126,7 @@ func normalizeAliasCreationHistory(entry AliasCreationHistory, now time.Time) (A
 		return AliasCreationHistory{}, fmt.Errorf("created_at is invalid")
 	}
 	entry.CreatedAt = createdAt.UTC().Format(time.RFC3339)
-	entry.Aliases = append([]AliasCreationHistoryAlias(nil), entry.Aliases...)
+	entry.Aliases = cloneAliasCreationHistoryAliases(entry.Aliases)
 	for index := range entry.Aliases {
 		alias := &entry.Aliases[index]
 		alias.Email = strings.TrimSpace(alias.Email)
@@ -164,6 +170,9 @@ func (m *Manager) ListAliasCreationHistory(id string, limit int) ([]AliasCreatio
 		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, id)
 	}
 	entries := cloneAliasCreationHistory(acc.AliasCreationHistory)
+	if entries == nil {
+		return []AliasCreationHistory{}, nil
+	}
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}

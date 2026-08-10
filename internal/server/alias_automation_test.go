@@ -690,6 +690,23 @@ func TestAliasCreationHistoryAPIAndCSVExport(t *testing.T) {
 	srv.aliasOperations = newFakeAliasOperations(mgr, client)
 	srv.aliasAutomation = newAliasAutomationService(mgr, srv.aliasOperations)
 
+	emptyHistoryRequest := httptest.NewRequest(http.MethodGet, "/api/accounts/acc_automation/alias-creation-history?limit=10", nil)
+	emptyHistoryResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(emptyHistoryResponse, emptyHistoryRequest)
+	if emptyHistoryResponse.Code != http.StatusOK {
+		t.Fatalf("empty history status = %d, body = %s", emptyHistoryResponse.Code, emptyHistoryResponse.Body.String())
+	}
+	var emptyHistoryBody struct {
+		Data    aliasCreationHistoryData `json:"data"`
+		Success bool                     `json:"success"`
+	}
+	if err := json.Unmarshal(emptyHistoryResponse.Body.Bytes(), &emptyHistoryBody); err != nil {
+		t.Fatalf("decode empty history response: %v", err)
+	}
+	if !emptyHistoryBody.Success || emptyHistoryBody.Data.Entries == nil {
+		t.Fatalf("empty history response = %+v, want a non-nil entries array", emptyHistoryBody)
+	}
+
 	batchRequest := httptest.NewRequest(
 		http.MethodPost,
 		"/api/accounts/acc_automation/aliases/batch",

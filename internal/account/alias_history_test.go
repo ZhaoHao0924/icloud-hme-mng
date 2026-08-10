@@ -59,6 +59,41 @@ func TestAliasCreationHistoryPersistsAndReturnsDeepCopies(t *testing.T) {
 	}
 }
 
+func TestAliasCreationHistoryEmptyResultsUseArrays(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+
+	history, err := mgr.ListAliasCreationHistory("acc_cookie", 10)
+	if err != nil {
+		t.Fatalf("ListAliasCreationHistory() error = %v", err)
+	}
+	if history == nil {
+		t.Fatal("ListAliasCreationHistory() returned nil history")
+	}
+
+	recorded, err := mgr.RecordAliasCreation("acc_cookie", AliasCreationHistory{
+		Complete:  false,
+		Created:   0,
+		Failed:    1,
+		Requested: 1,
+		Status:    AliasAutomationStatusError,
+		Trigger:   AliasCreationTriggerManual,
+	}, time.Date(2026, time.August, 2, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("RecordAliasCreation() error = %v", err)
+	}
+	if recorded.Aliases == nil {
+		t.Fatal("RecordAliasCreation() returned nil aliases")
+	}
+
+	history, err = mgr.ListAliasCreationHistory("acc_cookie", 10)
+	if err != nil {
+		t.Fatalf("ListAliasCreationHistory() error = %v", err)
+	}
+	if len(history) != 1 || history[0].Aliases == nil {
+		t.Fatalf("history = %+v, want one entry with an empty aliases array", history)
+	}
+}
+
 func TestAliasCreationHistoryRejectsInvalidRecord(t *testing.T) {
 	mgr := newManagerWithCookies(t)
 	_, err := mgr.RecordAliasCreation("acc_cookie", AliasCreationHistory{
