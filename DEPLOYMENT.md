@@ -36,6 +36,10 @@ docker compose down
 
 ## Updating
 
+For a command-by-command Linux Docker procedure, including offline `tar`
+verification and image/data rollback, see
+[LINUX_DOCKER_UPGRADE.md](LINUX_DOCKER_UPGRADE.md).
+
 1. Pause any active alias automation rules in the Web UI.
 2. Create and verify a backup as described below.
 3. Update the source or image version in the deployment directory.
