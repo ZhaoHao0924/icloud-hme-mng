@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { AppProviders } from "../../app/AppProviders";
 import { createQueryClient } from "../../app/queryClient";
 import { routes } from "../../app/router";
-import { mockAliasAutomation } from "../../test/mocks/server";
+import { mockAliasAutomation, mockAliasCreationHistory } from "../../test/mocks/server";
 
 function renderAutomation(path = "/accounts/acc_primary/automation") {
   const router = createMemoryRouter(routes, { initialEntries: [path] });
@@ -36,6 +36,80 @@ describe("AliasAutomationPage", () => {
     expect(screen.getByLabelText("结束")).toHaveValue("");
     expect(screen.getByRole("button", { name: "批量创建" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "创建历史" })).toBeInTheDocument();
+  });
+
+  it("paginates creation history entries", async () => {
+    for (let index = 0; index < 11; index += 1) {
+      mockAliasCreationHistory.record("acc_primary", {
+        aliases: [],
+        complete: true,
+        created: 0,
+        error: "",
+        failed: 0,
+        label_prefix: "",
+        requested: 0,
+        status: "success",
+        trigger: "batch",
+      });
+    }
+
+    const user = userEvent.setup();
+    renderAutomation();
+
+    expect(await screen.findByText("batch_mock_11")).toBeInTheDocument();
+    expect(screen.queryByText("batch_mock_1")).not.toBeInTheDocument();
+    expect(screen.getByText("1 / 2 页")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(await screen.findByText("batch_mock_1")).toBeInTheDocument();
+    expect(screen.queryByText("batch_mock_11")).not.toBeInTheDocument();
+    expect(screen.getByText("2 / 2 页")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+  });
+
+  it("expands and collapses aliases in their own history row", async () => {
+    mockAliasCreationHistory.record("acc_primary", {
+      aliases: [
+        {
+          created_at: "2026-08-02T09:00:00.000Z",
+          email: "first@example.test",
+          label: "first",
+        },
+        {
+          created_at: "2026-08-02T09:00:00.000Z",
+          email: "second@example.test",
+          label: "second",
+        },
+      ],
+      complete: true,
+      created: 2,
+      error: "",
+      failed: 0,
+      label_prefix: "",
+      requested: 2,
+      status: "success",
+      trigger: "batch",
+    });
+
+    const user = userEvent.setup();
+    renderAutomation();
+
+    const toggle = await screen.findByRole("button", { name: /2/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("first@example.test")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+
+    expect(await screen.findByText("first@example.test")).toBeInTheDocument();
+    expect(screen.getByText("second@example.test")).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(screen.queryByText("first@example.test")).not.toBeInTheDocument();
+    });
   });
 
   it("saves a schedule window and previews the current rule without creating aliases", async () => {

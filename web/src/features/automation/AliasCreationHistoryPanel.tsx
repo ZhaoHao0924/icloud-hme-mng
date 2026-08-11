@@ -1,5 +1,14 @@
+import { Fragment, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Download, LoaderCircle, RefreshCw } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Download,
+  LoaderCircle,
+  RefreshCw,
+} from "lucide-react";
 
 import { api, getApiErrorMessage } from "../../api/client";
 import { aliasCreationHistoryQueryOptions } from "../../api/queries";
@@ -9,6 +18,8 @@ import { useNotifications } from "../../components/notificationContext";
 type AliasCreationHistoryPanelProps = {
   accountId: string;
 };
+
+const historyPageSize = 10;
 
 function formatTime(value: string) {
   const time = new Date(value);
@@ -62,6 +73,11 @@ function downloadCSV(csv: string) {
 
 export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPanelProps) {
   const { notify } = useNotifications();
+  const [pageState, setPageState] = useState<{ key: string | null; page: number }>({
+    key: null,
+    page: 1,
+  });
+  const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
   const historyQuery = useQuery(aliasCreationHistoryQueryOptions(accountId));
   const exportHistory = useMutation({
     mutationFn: () => api.downloadAliasCreationHistory(accountId),
@@ -73,6 +89,13 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
   });
 
   const entries = historyQuery.data?.entries ?? [];
+  const pageCount = Math.max(1, Math.ceil(entries.length / historyPageSize));
+  const pageStateKey = `${accountId}:${historyQuery.data?.count ?? 0}`;
+  const currentPage = Math.min(pageState.key === pageStateKey ? pageState.page : 1, pageCount);
+  const pagedEntries = entries.slice(
+    (currentPage - 1) * historyPageSize,
+    currentPage * historyPageSize,
+  );
   const pending = exportHistory.isPending || historyQuery.isFetching;
 
   return (
@@ -135,48 +158,109 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
               </tr>
             </thead>
             <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.batch_id}>
-                  <td>
-                    <code>{entry.batch_id}</code>
-                  </td>
-                  <td>{triggerLabel(entry.trigger)}</td>
-                  <td>
-                    <span
-                      className={`creation-history-status creation-history-status-${entry.status}`}
-                    >
-                      {statusLabel(entry.status)}
-                    </span>
-                    {entry.error ? (
-                      <span className="creation-history-error">{entry.error}</span>
+              {pagedEntries.map((entry) => {
+                const aliasesExpanded = expandedBatchId === entry.batch_id;
+
+                return (
+                  <Fragment key={entry.batch_id}>
+                    <tr className="creation-history-row">
+                      <td className="creation-history-batch">
+                        <code>{entry.batch_id}</code>
+                      </td>
+                      <td className="creation-history-source">{triggerLabel(entry.trigger)}</td>
+                      <td className="creation-history-result">
+                        <span
+                          className={`creation-history-status creation-history-status-${entry.status}`}
+                        >
+                          {statusLabel(entry.status)}
+                        </span>
+                        {entry.error ? (
+                          <span className="creation-history-error">{entry.error}</span>
+                        ) : null}
+                      </td>
+                      <td className="creation-history-quantity">
+                        <span className="creation-history-quantity-value">
+                          {entry.created} / {entry.requested}
+                        </span>
+                        {entry.failed > 0 ? (
+                          <span className="creation-history-failed">失败 {entry.failed}</span>
+                        ) : null}
+                      </td>
+                      <td className="creation-history-time">{formatTime(entry.created_at)}</td>
+                      <td className="creation-history-alias-cell">
+                        {entry.aliases.length > 0 ? (
+                          <button
+                            className="creation-history-alias-toggle"
+                            type="button"
+                            aria-expanded={aliasesExpanded}
+                            onClick={() => {
+                              setExpandedBatchId((current) =>
+                                current === entry.batch_id ? null : entry.batch_id,
+                              );
+                            }}
+                          >
+                            {aliasesExpanded ? (
+                              <ChevronUp size={15} aria-hidden="true" />
+                            ) : (
+                              <ChevronDown size={15} aria-hidden="true" />
+                            )}
+                            <span>{entry.aliases.length} 个别名</span>
+                          </button>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                    </tr>
+                    {aliasesExpanded ? (
+                      <tr className="creation-history-alias-row">
+                        <td colSpan={6}>
+                          <div className="creation-history-alias-panel">
+                            <ul className="creation-history-alias-list">
+                              {entry.aliases.map((alias) => (
+                                <li key={`${entry.batch_id}-${alias.email}`}>
+                                  <code>{alias.email}</code>
+                                  {alias.label ? <span>{alias.label}</span> : null}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </td>
+                      </tr>
                     ) : null}
-                  </td>
-                  <td>
-                    {entry.created} / {entry.requested}
-                    {entry.failed > 0 ? `，失败 ${entry.failed}` : ""}
-                  </td>
-                  <td>{formatTime(entry.created_at)}</td>
-                  <td>
-                    {entry.aliases.length > 0 ? (
-                      <details className="creation-history-aliases">
-                        <summary>{entry.aliases.length} 个别名</summary>
-                        <ul>
-                          {entry.aliases.map((alias) => (
-                            <li key={`${entry.batch_id}-${alias.email}`}>
-                              <code>{alias.email}</code>
-                              {alias.label ? <span>{alias.label}</span> : null}
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
+          {entries.length > historyPageSize ? (
+            <nav className="creation-history-pagination" aria-label="创建历史分页">
+              <span className="creation-history-pagination-summary">
+                {currentPage} / {pageCount} 页
+              </span>
+              <div className="creation-history-pagination-controls">
+                <button
+                  className="icon-button creation-history-pagination-button"
+                  type="button"
+                  aria-label="上一页"
+                  title="上一页"
+                  disabled={currentPage === 1}
+                  onClick={() => setPageState({ key: pageStateKey, page: currentPage - 1 })}
+                >
+                  <ChevronLeft size={17} aria-hidden="true" />
+                </button>
+                <button
+                  className="icon-button creation-history-pagination-button"
+                  type="button"
+                  aria-label="下一页"
+                  title="下一页"
+                  disabled={currentPage === pageCount}
+                  onClick={() => setPageState({ key: pageStateKey, page: currentPage + 1 })}
+                >
+                  <ChevronRight size={17} aria-hidden="true" />
+                </button>
+              </div>
+            </nav>
+          ) : null}
         </div>
       )}
 

@@ -357,7 +357,7 @@ describe("API client", () => {
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      "/api/accounts/account%20%2F%20id/alias-creation-history?limit=100",
+      "/api/accounts/account%20%2F%20id/alias-creation-history?limit=500",
       expect.objectContaining({ method: "GET" }),
     );
     expect(fetcher).toHaveBeenNthCalledWith(

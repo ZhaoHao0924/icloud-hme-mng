@@ -49,6 +49,7 @@ import {
 } from "./schemas";
 
 const defaultApiBaseUrl = "/api";
+const aliasCreationHistoryRequestLimit = 500;
 
 export type ApiErrorKind = "http" | "network" | "invalid_response" | "timeout";
 
@@ -635,7 +636,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request({
         method: "GET",
         path: endpointPath("accounts", accountId, "alias-creation-history"),
-        query: { limit: 100 },
+        query: { limit: aliasCreationHistoryRequestLimit },
         responseSchema: aliasCreationHistorySchema,
         signal: requestOptions?.signal,
       });
