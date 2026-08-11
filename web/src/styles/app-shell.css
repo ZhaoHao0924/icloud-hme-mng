@@ -1197,17 +1197,14 @@
   white-space: nowrap;
 }
 
-.creation-history-quantity {
-  display: grid;
-  gap: 2px;
-}
-
 .creation-history-quantity-value,
 .creation-history-failed {
+  display: block;
   white-space: nowrap;
 }
 
 .creation-history-failed {
+  margin-top: 2px;
   color: var(--color-danger);
 }
 
