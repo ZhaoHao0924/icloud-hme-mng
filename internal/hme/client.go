@@ -487,6 +487,9 @@ func (c *Client) ListAliases() ([]Alias, error) {
 	if err != nil {
 		return nil, err
 	}
+	if success := gjson.Get(body, "success"); success.Exists() && !success.Bool() {
+		return nil, fmt.Errorf("HME 列表请求未获 iCloud 确认")
+	}
 	aliases := parseAliasList(body)
 	c.log("共 %d 个别名", len(aliases))
 	return aliases, nil

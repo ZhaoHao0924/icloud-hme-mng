@@ -356,13 +356,21 @@ type fakeCookieValidationClient struct {
 	cookies       map[string]string
 	accountInfo   *hme.AccountInfo
 	validationErr error
+	aliases       []hme.Alias
+	listErr       error
 	validateCalls int
+	listCalls     int
 	closeCalls    int
 }
 
 func (c *fakeCookieValidationClient) ValidateSession() error {
 	c.validateCalls++
 	return c.validationErr
+}
+
+func (c *fakeCookieValidationClient) ListAliases() ([]hme.Alias, error) {
+	c.listCalls++
+	return append([]hme.Alias(nil), c.aliases...), c.listErr
 }
 
 func (c *fakeCookieValidationClient) SessionCookies() map[string]string {
@@ -397,6 +405,9 @@ func TestUpdateCookiesReturnsValidationFailureAfterPersistingErrorState(t *testi
 	if client.validateCalls != 1 || client.closeCalls != 1 {
 		t.Errorf("client calls = validate %d, close %d; want 1 each", client.validateCalls, client.closeCalls)
 	}
+	if client.listCalls != 0 {
+		t.Errorf("ListAliases() calls = %d, want 0 after validation failure", client.listCalls)
+	}
 	acc, _ := mgr.accountSnapshot("acc_cookie")
 	if acc.Status != "error" || acc.LastError != "Cookie 校验失败: HTTP 401" {
 		t.Errorf("persisted validation state = status %q, error %q", acc.Status, acc.LastError)
@@ -416,6 +427,10 @@ func TestUpdateCookiesReturnsActiveAccountAfterValidation(t *testing.T) {
 	mgr := newManagerWithCookies(t)
 	client := &fakeCookieValidationClient{
 		cookies: map[string]string{"session": "validated"},
+		aliases: []hme.Alias{
+			{AnonymousID: "active", Active: true},
+			{AnonymousID: "inactive", Active: false},
+		},
 		accountInfo: &hme.AccountInfo{
 			AppleID:      "owner@example.com",
 			PrimaryEmail: "owner@icloud.com",
@@ -432,12 +447,94 @@ func TestUpdateCookiesReturnsActiveAccountAfterValidation(t *testing.T) {
 	if dto.Status != "active" || dto.LastValidated == "" || dto.RealEmail != "owner@example.com" {
 		t.Errorf("UpdateCookies() DTO = %+v", dto)
 	}
-	if client.validateCalls != 1 || client.closeCalls != 1 {
-		t.Errorf("client calls = validate %d, close %d; want 1 each", client.validateCalls, client.closeCalls)
+	if client.validateCalls != 1 || client.listCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client calls = validate %d, list %d, close %d; want 1 each", client.validateCalls, client.listCalls, client.closeCalls)
 	}
 	acc, _ := mgr.accountSnapshot("acc_cookie")
 	if got := acc.Cookies["session"]; got != "validated" {
 		t.Errorf("persisted session cookie = %q, want validated", got)
+	}
+	if acc.AliasTotal != 2 || acc.AliasActive != 1 {
+		t.Errorf("persisted alias counts = total %d active %d, want 2 and 1", acc.AliasTotal, acc.AliasActive)
+	}
+}
+
+func TestUpdateCookiesRejectsSessionThatCannotListAliases(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	client := &fakeCookieValidationClient{
+		cookies: map[string]string{"session": "refreshed-after-list-failure"},
+		listErr: errors.New("HTTP 401"),
+	}
+	mgr.newCookieValidationClient = func(map[string]string, string, string, bool) (cookieValidationClient, error) {
+		return client, nil
+	}
+
+	_, err := mgr.UpdateCookies("acc_cookie", map[string]string{"session": "replacement"})
+	if err == nil || !strings.Contains(err.Error(), "HME 列表校验失败: HTTP 401") {
+		t.Fatalf("UpdateCookies() error = %v, want HME list validation failure", err)
+	}
+	if client.validateCalls != 1 || client.listCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client calls = validate %d, list %d, close %d; want 1 each", client.validateCalls, client.listCalls, client.closeCalls)
+	}
+	acc, _ := mgr.accountSnapshot("acc_cookie")
+	if acc.Status != "error" || !strings.Contains(acc.LastError, "HME 列表校验失败: HTTP 401") {
+		t.Errorf("persisted validation state = status %q, error %q", acc.Status, acc.LastError)
+	}
+	if got := acc.Cookies["session"]; got != "refreshed-after-list-failure" {
+		t.Errorf("persisted session cookie = %q, want refreshed Cookie", got)
+	}
+	if acc.LastValidated != "" {
+		t.Errorf("LastValidated = %q after list failure, want empty", acc.LastValidated)
+	}
+}
+
+func TestUpdateCookiesClearsOnlyAutomationSessionErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		previousError string
+		wantError     string
+	}{
+		{name: "session error", previousError: "iCloud 会话失效，请更新 Cookie", wantError: ""},
+		{name: "non session error", previousError: "已达到今日自动创建上限 5，将在次日继续", wantError: "已达到今日自动创建上限 5，将在次日继续"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := newManagerWithCookies(t)
+			now := time.Date(2026, time.August, 13, 10, 0, 0, 0, time.UTC)
+			rule := DefaultAliasAutomation()
+			rule.Enabled = true
+			rule.ScheduledBatchSize = 1
+			if _, err := mgr.SetAliasAutomation("acc_cookie", rule, now); err != nil {
+				t.Fatalf("SetAliasAutomation() error = %v", err)
+			}
+			if _, err := mgr.RecordAliasAutomationRun("acc_cookie", AliasAutomationRun{
+				ActiveAliases: 0,
+				Error:         tt.previousError,
+				Status:        AliasAutomationStatusError,
+			}, now); err != nil {
+				t.Fatalf("RecordAliasAutomationRun() error = %v", err)
+			}
+
+			client := &fakeCookieValidationClient{cookies: map[string]string{"session": "validated"}}
+			mgr.newCookieValidationClient = func(map[string]string, string, string, bool) (cookieValidationClient, error) {
+				return client, nil
+			}
+			if _, err := mgr.UpdateCookies("acc_cookie", map[string]string{"session": "replacement"}); err != nil {
+				t.Fatalf("UpdateCookies() error = %v", err)
+			}
+
+			automation, err := mgr.GetAliasAutomation("acc_cookie")
+			if err != nil {
+				t.Fatalf("GetAliasAutomation() error = %v", err)
+			}
+			if automation.LastError != tt.wantError {
+				t.Errorf("LastError = %q, want %q", automation.LastError, tt.wantError)
+			}
+			if !automation.Enabled || automation.ConsecutiveFailure != 1 {
+				t.Errorf("credential update changed automation state: %+v", automation)
+			}
+		})
 	}
 }
 
@@ -584,6 +681,9 @@ type fakePasswordLoginClient struct {
 	verifyCalls   int
 	validateErr   error
 	validateCalls int
+	aliases       []hme.Alias
+	listErr       error
+	listCalls     int
 	closeCalls    int
 }
 
@@ -617,6 +717,11 @@ func (c *fakePasswordLoginClient) Validate() (bool, error) {
 	return true, nil
 }
 
+func (c *fakePasswordLoginClient) ListAliases() ([]hme.Alias, error) {
+	c.listCalls++
+	return append([]hme.Alias(nil), c.aliases...), c.listErr
+}
+
 func (c *fakePasswordLoginClient) SessionCookies() map[string]string {
 	out := make(map[string]string, len(c.cookies))
 	for name, value := range c.cookies {
@@ -631,7 +736,26 @@ func (c *fakePasswordLoginClient) Close() {
 
 func TestStartPasswordLoginPersistsDirectSuccess(t *testing.T) {
 	mgr := newPendingLoginManager(t)
-	client := &fakePasswordLoginClient{cookies: map[string]string{"session": "direct-cookie"}}
+	now := time.Date(2026, time.August, 13, 10, 0, 0, 0, time.UTC)
+	rule := DefaultAliasAutomation()
+	rule.Enabled = true
+	rule.ScheduledBatchSize = 1
+	if _, err := mgr.SetAliasAutomation("acc_login", rule, now); err != nil {
+		t.Fatalf("SetAliasAutomation() error = %v", err)
+	}
+	if _, err := mgr.RecordAliasAutomationRun("acc_login", AliasAutomationRun{
+		Error:  "iCloud 会话失效，请更新 Cookie",
+		Status: AliasAutomationStatusError,
+	}, now); err != nil {
+		t.Fatalf("RecordAliasAutomationRun() error = %v", err)
+	}
+	client := &fakePasswordLoginClient{
+		cookies: map[string]string{"session": "direct-cookie"},
+		aliases: []hme.Alias{
+			{AnonymousID: "active", Active: true},
+			{AnonymousID: "inactive", Active: false},
+		},
+	}
 	mgr.newPasswordLoginClient = func(map[string]string, string, string, bool) (passwordLoginClient, error) {
 		return client, nil
 	}
@@ -649,15 +773,25 @@ func TestStartPasswordLoginPersistsDirectSuccess(t *testing.T) {
 	if dto.Status != "active" || !dto.HasCookies || dto.LastValidated == "" {
 		t.Errorf("direct login DTO = %+v, want active account with cookies", dto)
 	}
+	if dto.AliasTotal != 2 || dto.AliasActive != 1 {
+		t.Errorf("direct login alias counts = total %d active %d, want 2 and 1", dto.AliasTotal, dto.AliasActive)
+	}
 	if client.closeCalls != 1 {
 		t.Errorf("client close calls = %d, want 1", client.closeCalls)
 	}
-	if client.validateCalls != 1 {
-		t.Errorf("client validate calls = %d, want 1", client.validateCalls)
+	if client.validateCalls != 1 || client.listCalls != 1 {
+		t.Errorf("client calls = validate %d, list %d; want 1 each", client.validateCalls, client.listCalls)
 	}
 	acc, _ := mgr.accountSnapshot("acc_login")
 	if got := acc.Cookies["session"]; got != "direct-cookie" {
 		t.Errorf("persisted session cookie = %q, want direct-cookie", got)
+	}
+	automation, err := mgr.GetAliasAutomation("acc_login")
+	if err != nil {
+		t.Fatalf("GetAliasAutomation() error = %v", err)
+	}
+	if automation.LastError != "" || !automation.Enabled || automation.ConsecutiveFailure != 1 {
+		t.Errorf("direct login changed automation state unexpectedly: %+v", automation)
 	}
 }
 
@@ -693,8 +827,8 @@ func TestPasswordLoginSessionVerifiesOnceAndPersists(t *testing.T) {
 	if client.otp != "123456" || client.verifyCalls != 1 || client.closeCalls != 1 {
 		t.Errorf("verify client state = otp %q, verify %d, close %d", client.otp, client.verifyCalls, client.closeCalls)
 	}
-	if client.validateCalls != 1 {
-		t.Errorf("verify client validate calls = %d, want 1", client.validateCalls)
+	if client.validateCalls != 1 || client.listCalls != 1 {
+		t.Errorf("verify client calls = validate %d, list %d; want 1 each", client.validateCalls, client.listCalls)
 	}
 	if _, err := session.Verify("123456"); !errors.Is(err, ErrLoginSessionInvalid) {
 		t.Fatalf("second Verify() error = %v, want ErrLoginSessionInvalid", err)
@@ -724,9 +858,38 @@ func TestStartPasswordLoginDoesNotPersistUnvalidatedSession(t *testing.T) {
 	if client.validateCalls != 1 || client.closeCalls != 1 {
 		t.Errorf("client state = validate %d, close %d", client.validateCalls, client.closeCalls)
 	}
+	if client.listCalls != 0 {
+		t.Errorf("ListAliases() calls = %d, want 0 after basic validation failure", client.listCalls)
+	}
 	acc, _ := mgr.accountSnapshot("acc_login")
 	if acc.Status != "pending" || len(acc.Cookies) != 0 || acc.LastValidated != "" {
 		t.Errorf("unvalidated login changed account: %#v", acc)
+	}
+}
+
+func TestStartPasswordLoginDoesNotPersistSessionThatCannotListAliases(t *testing.T) {
+	mgr := newPendingLoginManager(t)
+	client := &fakePasswordLoginClient{
+		cookies: map[string]string{"session": "unusable-hme-cookie"},
+		listErr: errors.New("HTTP 403"),
+	}
+	mgr.newPasswordLoginClient = func(map[string]string, string, string, bool) (passwordLoginClient, error) {
+		return client, nil
+	}
+
+	_, session, err := mgr.StartPasswordLogin("acc_login", "apple-password")
+	if err == nil || !strings.Contains(err.Error(), "HME 列表校验失败: HTTP 403") {
+		t.Fatalf("StartPasswordLogin() error = %v, want HME list validation failure", err)
+	}
+	if session != nil {
+		t.Fatal("StartPasswordLogin() session != nil")
+	}
+	if client.validateCalls != 1 || client.listCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client calls = validate %d, list %d, close %d; want 1 each", client.validateCalls, client.listCalls, client.closeCalls)
+	}
+	acc, _ := mgr.accountSnapshot("acc_login")
+	if acc.Status != "pending" || len(acc.Cookies) != 0 || acc.LastValidated != "" {
+		t.Errorf("unusable HME login changed account: %#v", acc)
 	}
 }
 

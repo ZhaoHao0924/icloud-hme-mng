@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, LoaderCircle, LogIn, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -31,6 +31,14 @@ type OtpSubmission = {
 };
 
 const otpDefaultValues: OtpCodeFormValues = { otpCode: "" };
+
+async function invalidateSessionCredentialQueries(queryClient: QueryClient, accountId: string) {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.accounts }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.aliasAutomation(accountId) }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.aliases(accountId) }),
+  ]);
+}
 
 function getAppleLoginErrorMessage(error: unknown) {
   if (isApiError(error) && (error.status === 401 || error.status === 403)) {
@@ -137,7 +145,7 @@ export function AppleLoginSection({
       return;
     }
 
-    await queryClient.invalidateQueries({ queryKey: queryKeys.accounts });
+    await invalidateSessionCredentialQueries(queryClient, account.id);
     notify({ title: "Apple 登录成功", message: result.account.name, tone: "success" });
     onAuthenticated?.();
     loginWithPassword.reset();
@@ -147,7 +155,7 @@ export function AppleLoginSection({
     setPendingChallenge(null);
     setChallengeNotice(null);
     resetOtp(otpDefaultValues);
-    await queryClient.invalidateQueries({ queryKey: queryKeys.accounts });
+    await invalidateSessionCredentialQueries(queryClient, account.id);
     notify({ title: "Apple 登录成功", message: updatedAccount.name, tone: "success" });
     onAuthenticated?.();
     verifyLogin.reset();

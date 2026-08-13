@@ -604,6 +604,27 @@ func aliasAutomationPauseReasonMessage(reason string) string {
 	}
 }
 
+func clearAliasAutomationSessionError(acc *Account) {
+	if acc == nil || acc.AliasAutomation == nil || !isAliasAutomationSessionError(acc.AliasAutomation.LastError) {
+		return
+	}
+	acc.AliasAutomation = cloneAliasAutomation(acc.AliasAutomation)
+	acc.AliasAutomation.LastError = ""
+}
+
+func isAliasAutomationSessionError(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(normalized, "icloud 会话失效") ||
+		strings.Contains(normalized, "cookie 会话已过期") ||
+		strings.Contains(normalized, "cookie 已过期") ||
+		strings.Contains(normalized, "cookie已过期") ||
+		strings.Contains(normalized, "session expired") ||
+		strings.Contains(normalized, "http 401") ||
+		strings.Contains(normalized, "http 403") ||
+		strings.Contains(normalized, "unauthorized") ||
+		strings.Contains(normalized, "forbidden")
+}
+
 // PauseAliasAutomation stops an existing rule without changing its progress.
 func (m *Manager) PauseAliasAutomation(id string, now time.Time) (AliasAutomation, error) {
 	if now.IsZero() {

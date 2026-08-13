@@ -61,7 +61,11 @@ function CookieSection({
       }
     },
     onSuccess: async (updatedAccount) => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.accounts });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.accounts }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.aliasAutomation(account.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.aliases(account.id) }),
+      ]);
       notify({ title: "Cookie 已更新", message: updatedAccount.name, tone: "success" });
       onSessionRestored?.();
     },

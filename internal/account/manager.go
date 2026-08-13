@@ -65,6 +65,7 @@ type passwordLoginClient interface {
 	StartLogin(username, password string) (*hme.LoginChallenge, error)
 	VerifyLogin(challenge *hme.LoginChallenge, otp string) error
 	Validate() (bool, error)
+	ListAliases() ([]hme.Alias, error)
 	SessionCookies() map[string]string
 	Close()
 }
@@ -77,6 +78,7 @@ func defaultPasswordLoginClientFactory(cookies map[string]string, host, proxy st
 
 type cookieValidationClient interface {
 	ValidateSession() error
+	ListAliases() ([]hme.Alias, error)
 	SessionCookies() map[string]string
 	AccountInfo() *hme.AccountInfo
 	Close()
@@ -458,11 +460,7 @@ func (m *Manager) AddAccount(name, icloudEmail, cookieInput, host, proxy string)
 			}
 			if aliases, err := client.ListAliases(); err == nil {
 				acc.AliasTotal = len(aliases)
-				for _, a := range aliases {
-					if a.Active {
-						acc.AliasActive++
-					}
-				}
+				acc.AliasActive = countActiveAliases(aliases)
 			}
 			acc.LastValidated = time.Now().Format(time.RFC3339)
 		}
@@ -635,6 +633,10 @@ func (m *Manager) persistPasswordLogin(id string, client passwordLoginClient) (A
 	if !valid {
 		return AccountDTO{}, errors.New("登录会话校验失败")
 	}
+	aliases, err := client.ListAliases()
+	if err != nil {
+		return AccountDTO{}, fmt.Errorf("登录会话校验失败: HME 列表校验失败: %w", err)
+	}
 	cookies := client.SessionCookies()
 	if err := validateCookieCount(cookies); err != nil {
 		return AccountDTO{}, err
@@ -646,19 +648,16 @@ func (m *Manager) persistPasswordLogin(id string, client passwordLoginClient) (A
 		m.mu.Unlock()
 		return AccountDTO{}, fmt.Errorf("%w: %s", ErrAccountNotFound, id)
 	}
-	previousCookies := current.Cookies
-	previousStatus := current.Status
-	previousLastError := current.LastError
-	previousLastValidated := current.LastValidated
+	previous := cloneAccount(current)
 	current.Cookies = cloneCookies(cookies)
 	current.Status = "active"
 	current.LastError = ""
 	current.LastValidated = time.Now().Format(time.RFC3339)
+	current.AliasTotal = len(aliases)
+	current.AliasActive = countActiveAliases(aliases)
+	clearAliasAutomationSessionError(current)
 	if err := m.save(); err != nil {
-		current.Cookies = previousCookies
-		current.Status = previousStatus
-		current.LastError = previousLastError
-		current.LastValidated = previousLastValidated
+		m.accounts[id] = previous
 		m.mu.Unlock()
 		return AccountDTO{}, err
 	}
@@ -833,6 +832,14 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) (AccountDT
 	defer client.Close()
 	validationErr := client.ValidateSession()
 	acc.Cookies = client.SessionCookies()
+	var aliases []hme.Alias
+	if validationErr == nil {
+		aliases, validationErr = client.ListAliases()
+		acc.Cookies = client.SessionCookies()
+		if validationErr != nil {
+			validationErr = fmt.Errorf("HME 列表校验失败: %w", validationErr)
+		}
+	}
 	if validationErr != nil {
 		validationSecrets = append(validationSecrets, accountSensitiveValues(acc)...)
 		validationErr = safeAccountOperationError(validationErr, validationSecrets...)
@@ -843,6 +850,8 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) (AccountDT
 		acc.Status = "active"
 		acc.LastValidated = time.Now().Format(time.RFC3339)
 		acc.LastError = ""
+		acc.AliasTotal = len(aliases)
+		acc.AliasActive = countActiveAliases(aliases)
 		if info := client.AccountInfo(); info != nil {
 			acc.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
 			if acc.ICloudEmail == "" {
@@ -876,8 +885,13 @@ func (m *Manager) commitCookieValidation(id string, result *Account) (AccountDTO
 	current.LastValidated = result.LastValidated
 	current.LastError = result.LastError
 	current.RealEmail = result.RealEmail
+	current.AliasTotal = result.AliasTotal
+	current.AliasActive = result.AliasActive
 	if current.ICloudEmail == "" && result.ICloudEmail != "" {
 		current.ICloudEmail = result.ICloudEmail
+	}
+	if current.Status == "active" {
+		clearAliasAutomationSessionError(current)
 	}
 	if err := m.save(); err != nil {
 		m.accounts[id] = previous
@@ -885,6 +899,16 @@ func (m *Manager) commitCookieValidation(id string, result *Account) (AccountDTO
 	}
 	dto := newAccountDTO(current)
 	return dto, nil
+}
+
+func countActiveAliases(aliases []hme.Alias) int {
+	active := 0
+	for _, alias := range aliases {
+		if alias.Active {
+			active++
+		}
+	}
+	return active
 }
 
 // ---- 辅助函数 ----

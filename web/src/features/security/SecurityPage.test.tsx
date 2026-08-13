@@ -50,6 +50,7 @@ describe("SecurityPage Cookie form", () => {
   it("updates Cookie state while keeping secrets out of query and mutation caches", async () => {
     const user = userEvent.setup();
     const { queryClient } = renderSecurityPage();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     const section = await screen.findByRole("region", { name: "Cookie" });
     const input = within(section).getByLabelText("Cookie 数据");
 
@@ -66,6 +67,11 @@ describe("SecurityPage Cookie form", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Cookie 已更新待登录账号");
     await waitFor(() => expect(within(section).getByText("已配置")).toBeInTheDocument());
     expect(screen.getAllByText("正常").length).toBeGreaterThan(0);
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.accounts });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.aliasAutomation("acc_pending"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.aliases("acc_pending") });
 
     const mutation = queryClient.getMutationCache().getAll().at(-1);
     expect(mutation?.state.variables).toBeUndefined();
@@ -186,6 +192,7 @@ describe("SecurityPage Apple login form", () => {
   it("completes a direct login without retaining the password", async () => {
     const user = userEvent.setup();
     const { queryClient } = renderSecurityPage();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     const section = await screen.findByRole("region", { name: "Apple 登录" });
     const passwordInput = within(section).getByLabelText("Apple ID 密码");
 
@@ -199,6 +206,11 @@ describe("SecurityPage Apple login form", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Apple 登录成功待登录账号");
     await waitFor(() => expect(within(section).getByText("Cookie 已配置")).toBeInTheDocument());
     expect(screen.getAllByText("正常").length).toBeGreaterThan(0);
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.accounts });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.aliasAutomation("acc_pending"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.aliases("acc_pending") });
 
     const mutation = queryClient.getMutationCache().getAll().at(-1);
     expect(mutation?.state.variables).toBeUndefined();
@@ -283,7 +295,7 @@ describe("SecurityPage Apple login form", () => {
     expect(verifyRequests).toBe(0);
   });
 
-  it("verifies OTP, refreshes only accounts, and clears all submitted secrets", async () => {
+  it("verifies OTP, refreshes session-dependent queries, and clears all submitted secrets", async () => {
     const user = userEvent.setup();
     const { queryClient, router } = renderSecurityPage();
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
@@ -305,8 +317,11 @@ describe("SecurityPage Apple login form", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Apple 登录成功待登录账号");
     await waitFor(() => expect(within(section).getByText("Cookie 已配置")).toBeInTheDocument());
     expect(screen.getAllByText("正常").length).toBeGreaterThan(0);
-    expect(invalidateQueries).toHaveBeenCalledTimes(1);
     expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.accounts });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.aliasAutomation("acc_pending"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.aliases("acc_pending") });
 
     const clientState = JSON.stringify({
       mutations: queryClient

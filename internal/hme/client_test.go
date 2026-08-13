@@ -69,6 +69,33 @@ func TestParseAliasListNormalizesUnixMilliseconds(t *testing.T) {
 	}
 }
 
+func TestListAliasesRejectsUnconfirmedResponse(t *testing.T) {
+	httpClient := &scriptedAuthClient{responses: []scriptedAuthResponse{{
+		status: 200,
+		body:   `{"success":false,"result":{"hmeEmails":[]}}`,
+	}}}
+	client := &Client{
+		Cookies:    map[string]string{},
+		Host:       "icloud.com",
+		httpc:      httpClient,
+		serviceURL: "https://service.example.test",
+	}
+
+	aliases, err := client.ListAliases()
+	if err == nil || !strings.Contains(err.Error(), "未获 iCloud 确认") {
+		t.Fatalf("ListAliases() error = %v, want unconfirmed response error", err)
+	}
+	if aliases != nil {
+		t.Errorf("ListAliases() aliases = %#v, want nil after unconfirmed response", aliases)
+	}
+	if len(httpClient.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(httpClient.requests))
+	}
+	if got := httpClient.requests[0].url; !strings.Contains(got, "/v2/hme/list?") {
+		t.Errorf("request URL = %q, want HME list endpoint", got)
+	}
+}
+
 func TestAliasActionsRejectUnconfirmedResponses(t *testing.T) {
 	tests := []struct {
 		name   string
