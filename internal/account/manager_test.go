@@ -352,6 +352,95 @@ func TestSaveCookiesCopiesInput(t *testing.T) {
 	}
 }
 
+type fakeCookieValidationClient struct {
+	cookies       map[string]string
+	accountInfo   *hme.AccountInfo
+	validationErr error
+	validateCalls int
+	closeCalls    int
+}
+
+func (c *fakeCookieValidationClient) ValidateSession() error {
+	c.validateCalls++
+	return c.validationErr
+}
+
+func (c *fakeCookieValidationClient) SessionCookies() map[string]string {
+	out := make(map[string]string, len(c.cookies))
+	for name, value := range c.cookies {
+		out[name] = value
+	}
+	return out
+}
+
+func (c *fakeCookieValidationClient) AccountInfo() *hme.AccountInfo { return c.accountInfo }
+
+func (c *fakeCookieValidationClient) Close() { c.closeCalls++ }
+
+func TestUpdateCookiesReturnsValidationFailureAfterPersistingErrorState(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	client := &fakeCookieValidationClient{
+		cookies:       map[string]string{"session": "replacement", "refreshed": "value"},
+		validationErr: errors.New("HTTP 401"),
+	}
+	mgr.newCookieValidationClient = func(cookies map[string]string, host, proxy string, verbose bool) (cookieValidationClient, error) {
+		if got := cookies["session"]; got != "replacement" {
+			t.Errorf("factory session cookie = %q, want replacement", got)
+		}
+		return client, nil
+	}
+
+	_, err := mgr.UpdateCookies("acc_cookie", map[string]string{"session": "replacement"})
+	if err == nil || !strings.Contains(err.Error(), "Cookie 校验失败: HTTP 401") {
+		t.Fatalf("UpdateCookies() error = %v, want validation failure", err)
+	}
+	if client.validateCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client calls = validate %d, close %d; want 1 each", client.validateCalls, client.closeCalls)
+	}
+	acc, _ := mgr.accountSnapshot("acc_cookie")
+	if acc.Status != "error" || acc.LastError != "Cookie 校验失败: HTTP 401" {
+		t.Errorf("persisted validation state = status %q, error %q", acc.Status, acc.LastError)
+	}
+	if got := acc.Cookies["session"]; got != "replacement" {
+		t.Errorf("persisted session cookie = %q, want replacement", got)
+	}
+	if got := acc.Cookies["refreshed"]; got != "value" {
+		t.Errorf("persisted refreshed cookie = %q, want value", got)
+	}
+	if acc.LastValidated != "" {
+		t.Errorf("LastValidated = %q after failed validation, want empty", acc.LastValidated)
+	}
+}
+
+func TestUpdateCookiesReturnsActiveAccountAfterValidation(t *testing.T) {
+	mgr := newManagerWithCookies(t)
+	client := &fakeCookieValidationClient{
+		cookies: map[string]string{"session": "validated"},
+		accountInfo: &hme.AccountInfo{
+			AppleID:      "owner@example.com",
+			PrimaryEmail: "owner@icloud.com",
+		},
+	}
+	mgr.newCookieValidationClient = func(map[string]string, string, string, bool) (cookieValidationClient, error) {
+		return client, nil
+	}
+
+	dto, err := mgr.UpdateCookies("acc_cookie", map[string]string{"session": "replacement"})
+	if err != nil {
+		t.Fatalf("UpdateCookies() error = %v", err)
+	}
+	if dto.Status != "active" || dto.LastValidated == "" || dto.RealEmail != "owner@example.com" {
+		t.Errorf("UpdateCookies() DTO = %+v", dto)
+	}
+	if client.validateCalls != 1 || client.closeCalls != 1 {
+		t.Errorf("client calls = validate %d, close %d; want 1 each", client.validateCalls, client.closeCalls)
+	}
+	acc, _ := mgr.accountSnapshot("acc_cookie")
+	if got := acc.Cookies["session"]; got != "validated" {
+		t.Errorf("persisted session cookie = %q, want validated", got)
+	}
+}
+
 func TestCookieCountBoundary(t *testing.T) {
 	allowed := makeTestCookies(MaxCookieCount)
 	rawAllowed, err := json.Marshal(allowed)
@@ -702,7 +791,8 @@ func newManagerWithCookies(t *testing.T) *Manager {
       "name": "Cookie 账号",
       "host": "icloud.com",
       "cookies": {"session": "stored-cookie"},
-      "status": "active"
+      "status": "active",
+      "last_validated": "2026-07-01T12:00:00Z"
     }
   ]
 }`)

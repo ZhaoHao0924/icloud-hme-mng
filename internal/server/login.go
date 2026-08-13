@@ -141,14 +141,19 @@ func (s *Server) startAccountLogin(c *gin.Context) {
 
 	accountID := c.Param("id")
 	s.loginChallenges.invalidateAccount(accountID)
-	dto, session, err := s.startPasswordLogin(accountID, req.Password)
+	var dto account.AccountDTO
+	var session *account.PasswordLoginSession
+	err := s.aliasOperations.withCredentialUpdate(accountID, func() error {
+		var err error
+		dto, session, err = s.startPasswordLogin(accountID, req.Password)
+		return err
+	})
 	if err != nil {
 		failPasswordLogin(c, "登录失败: ", err)
 		return
 	}
 	if session == nil {
 		s.loginChallenges.invalidateAccount(accountID)
-		s.aliasOperations.invalidateAccount(accountID)
 		ok(c, dto)
 		return
 	}
@@ -188,8 +193,12 @@ func (s *Server) verifyAccountLogin(c *gin.Context) {
 		fail(c, http.StatusGone, "登录 challenge 无效或已过期，请重新提交密码")
 		return
 	}
-	s.aliasOperations.invalidateAccount(c.Param("id"))
-	dto, err := s.verifyPasswordLogin(session, req.OTPCode)
+	var dto account.AccountDTO
+	err := s.aliasOperations.withCredentialUpdate(c.Param("id"), func() error {
+		var err error
+		dto, err = s.verifyPasswordLogin(session, req.OTPCode)
+		return err
+	})
 	if err != nil {
 		failPasswordLogin(c, "验证码验证失败: ", err)
 		return

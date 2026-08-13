@@ -835,12 +835,16 @@ func (s *Server) updateCookies(c *gin.Context) {
 		fail(c, http.StatusBadRequest, fmt.Sprintf("参数错误: Cookie 数量不能超过 %d", account.MaxCookieCount))
 		return
 	}
-	acc, err := s.mgr.UpdateCookies(id, req.Cookies)
+	var acc account.AccountDTO
+	err := s.aliasOperations.withCredentialUpdate(id, func() error {
+		var err error
+		acc, err = s.mgr.UpdateCookies(id, req.Cookies)
+		return err
+	})
 	if err != nil {
 		failAccountOperation(c, http.StatusBadRequest, "", err)
 		return
 	}
-	s.aliasOperations.invalidateAccount(id)
 	ok(c, acc)
 }
 

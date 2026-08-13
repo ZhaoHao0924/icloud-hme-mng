@@ -75,13 +75,27 @@ func defaultPasswordLoginClientFactory(cookies map[string]string, host, proxy st
 	return hme.NewClient(cookies, host, proxy, verbose)
 }
 
+type cookieValidationClient interface {
+	ValidateSession() error
+	SessionCookies() map[string]string
+	AccountInfo() *hme.AccountInfo
+	Close()
+}
+
+type cookieValidationClientFactory func(cookies map[string]string, host, proxy string, verbose bool) (cookieValidationClient, error)
+
+func defaultCookieValidationClientFactory(cookies map[string]string, host, proxy string, verbose bool) (cookieValidationClient, error) {
+	return hme.NewClient(cookies, host, proxy, verbose)
+}
+
 // Manager 管理多个 iCloud 账号,线程安全。
 type Manager struct {
-	mu                     sync.RWMutex
-	accounts               map[string]*Account
-	dataDir                string
-	dataFile               string
-	newPasswordLoginClient passwordLoginClientFactory
+	mu                        sync.RWMutex
+	accounts                  map[string]*Account
+	dataDir                   string
+	dataFile                  string
+	newPasswordLoginClient    passwordLoginClientFactory
+	newCookieValidationClient cookieValidationClientFactory
 }
 
 // NewManager 创建管理器。dataDir 用于存放 accounts.json。
@@ -90,10 +104,11 @@ func NewManager(dataDir string) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{
-		accounts:               make(map[string]*Account),
-		dataDir:                dataDir,
-		dataFile:               filepath.Join(dataDir, "accounts.json"),
-		newPasswordLoginClient: defaultPasswordLoginClientFactory,
+		accounts:                  make(map[string]*Account),
+		dataDir:                   dataDir,
+		dataFile:                  filepath.Join(dataDir, "accounts.json"),
+		newPasswordLoginClient:    defaultPasswordLoginClientFactory,
+		newCookieValidationClient: defaultCookieValidationClientFactory,
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -799,19 +814,31 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) (AccountDT
 	if acc.Host == "" {
 		acc.Host = "icloud.com"
 	}
-	client, err := hme.NewClient(acc.Cookies, acc.Host, acc.Proxy, false)
+	validationSecrets := accountSensitiveValues(acc)
+	factory := m.newCookieValidationClient
+	if factory == nil {
+		factory = defaultCookieValidationClientFactory
+	}
+	client, err := factory(acc.Cookies, acc.Host, acc.Proxy, false)
 	if err != nil {
+		err = safeAccountOperationError(err, validationSecrets...)
 		acc.Status = "error"
+		acc.LastValidated = ""
 		acc.LastError = "创建客户端失败: " + err.Error()
-		secrets := accountSensitiveValues(acc)
 		if _, saveErr := m.commitCookieValidation(id, acc); saveErr != nil {
 			return AccountDTO{}, saveErr
 		}
-		return AccountDTO{}, safeAccountOperationError(err, secrets...)
+		return AccountDTO{}, err
 	}
-	if err := client.ValidateSession(); err != nil {
+	defer client.Close()
+	validationErr := client.ValidateSession()
+	acc.Cookies = client.SessionCookies()
+	if validationErr != nil {
+		validationSecrets = append(validationSecrets, accountSensitiveValues(acc)...)
+		validationErr = safeAccountOperationError(validationErr, validationSecrets...)
 		acc.Status = "error"
-		acc.LastError = "Cookie 校验失败: " + err.Error()
+		acc.LastValidated = ""
+		acc.LastError = "Cookie 校验失败: " + validationErr.Error()
 	} else {
 		acc.Status = "active"
 		acc.LastValidated = time.Now().Format(time.RFC3339)
@@ -823,8 +850,14 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) (AccountDT
 			}
 		}
 	}
-	acc.Cookies = cloneCookies(client.Cookies)
-	return m.commitCookieValidation(id, acc)
+	dto, err := m.commitCookieValidation(id, acc)
+	if err != nil {
+		return AccountDTO{}, err
+	}
+	if validationErr != nil {
+		return AccountDTO{}, fmt.Errorf("Cookie 校验失败: %w", validationErr)
+	}
+	return dto, nil
 }
 
 func (m *Manager) commitCookieValidation(id string, result *Account) (AccountDTO, error) {

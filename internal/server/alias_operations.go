@@ -103,6 +103,19 @@ func (s *aliasOperationService) invalidateAccount(accountID string) {
 	s.forgetClientLocked(accountID)
 }
 
+// withCredentialUpdate serializes a credential replacement with every HME
+// operation for the account. The cached client must be discarded before the
+// replacement so a completed operation cannot persist its old session after
+// the new credentials have been validated.
+func (s *aliasOperationService) withCredentialUpdate(accountID string, update func() error) error {
+	lock := s.locks.lockFor(accountID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.forgetClientLocked(accountID)
+	return update()
+}
+
 func (s *aliasOperationService) invalidateAll() {
 	s.clientsMu.Lock()
 	accountIDs := make([]string, 0, len(s.clients))
