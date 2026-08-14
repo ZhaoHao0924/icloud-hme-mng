@@ -294,6 +294,20 @@ test("inbox keeps the desktop preview aligned with the fixed message list", asyn
   expect(scrollMetrics.overflowY).toBe("auto");
   expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
 
+  const selectedMessageMetrics = await page.evaluate(() => {
+    const list = document.querySelector<HTMLElement>(".inbox-message-list");
+    const selected = document.querySelector<HTMLElement>(".inbox-message-item-selected");
+    return {
+      listRight: list?.getBoundingClientRect().right ?? 0,
+      scrollbarGutter: list ? getComputedStyle(list).scrollbarGutter : "",
+      selectedRight: selected?.getBoundingClientRect().right ?? 0,
+    };
+  });
+  expect(selectedMessageMetrics.scrollbarGutter).toBe("auto");
+  expect(
+    Math.abs(selectedMessageMetrics.listRight - selectedMessageMetrics.selectedRight),
+  ).toBeLessThanOrEqual(1);
+
   const previewMetrics = await page.evaluate(() => {
     const messagePanel = document.querySelector<HTMLElement>(".inbox-message-panel");
     const panel = document.querySelector<HTMLElement>(".inbox-preview-panel");

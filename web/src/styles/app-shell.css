@@ -1434,7 +1434,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-color: var(--color-border-strong) transparent;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
   scrollbar-width: thin;
   list-style: none;
 }
