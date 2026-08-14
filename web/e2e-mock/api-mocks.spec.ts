@@ -268,9 +268,7 @@ test("inbox appends cursor pages without horizontal overflow", async ({ page }) 
   }
 });
 
-test("inbox keeps excess messages in a fixed list while the body grows naturally", async ({
-  page,
-}) => {
+test("inbox keeps the desktop preview aligned with the fixed message list", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/accounts/acc_primary/inbox?mock=inbox-scroll");
   await waitForMockWorker(page, "收件箱");
@@ -297,21 +295,28 @@ test("inbox keeps excess messages in a fixed list while the body grows naturally
   expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
 
   const previewMetrics = await page.evaluate(() => {
+    const messagePanel = document.querySelector<HTMLElement>(".inbox-message-panel");
     const panel = document.querySelector<HTMLElement>(".inbox-preview-panel");
     const copy = panel?.querySelector<HTMLElement>(".inbox-preview-copy");
     const body = copy?.querySelector<HTMLElement>(".inbox-plain-body");
     return {
       copyHeight: copy?.clientHeight ?? 0,
+      messagePanelHeight: messagePanel?.getBoundingClientRect().height ?? 0,
       panelHeight: panel?.getBoundingClientRect().height ?? 0,
       previewBodyHeight: body?.clientHeight ?? 0,
       previewBodyMaxHeight: body ? getComputedStyle(body).maxHeight : "",
+      previewBodyOverflowY: body ? getComputedStyle(body).overflowY : "",
       previewBodyScrollHeight: body?.scrollHeight ?? 0,
     };
   });
   expect(previewMetrics.panelHeight).toBeGreaterThan(0);
+  expect(
+    Math.abs(previewMetrics.panelHeight - previewMetrics.messagePanelHeight),
+  ).toBeLessThanOrEqual(1);
   expect(previewMetrics.copyHeight).toBeGreaterThan(0);
   expect(previewMetrics.previewBodyHeight).toBeGreaterThan(0);
   expect(previewMetrics.previewBodyMaxHeight).toBe("none");
+  expect(previewMetrics.previewBodyOverflowY).toBe("auto");
   expect(previewMetrics.previewBodyScrollHeight).toBeLessThanOrEqual(
     previewMetrics.previewBodyHeight + 1,
   );
@@ -388,6 +393,7 @@ test("inbox long content fits each responsive layout without horizontal overflow
         messageWidth: message?.clientWidth ?? 0,
         previewCopyScrollHeight: previewCopy?.scrollHeight ?? 0,
         previewCopyHeight: previewCopy?.clientHeight ?? 0,
+        previewCopyOverflowY: previewCopy ? getComputedStyle(previewCopy).overflowY : "",
         previewScrollWidth: preview?.scrollWidth ?? 0,
         previewWidth: preview?.clientWidth ?? 0,
         viewportWidth: window.innerWidth,
@@ -399,9 +405,14 @@ test("inbox long content fits each responsive layout without horizontal overflow
       expect(dimensions.messageScrollWidth).toBeLessThanOrEqual(dimensions.messageWidth);
     }
     expect(dimensions.previewScrollWidth).toBeLessThanOrEqual(dimensions.previewWidth);
-    expect(dimensions.previewCopyScrollHeight).toBeLessThanOrEqual(
-      dimensions.previewCopyHeight + 1,
-    );
+    if (viewport.width > 760) {
+      expect(dimensions.previewCopyOverflowY).toBe("auto");
+      expect(dimensions.previewCopyScrollHeight).toBeGreaterThan(dimensions.previewCopyHeight);
+    } else {
+      expect(dimensions.previewCopyScrollHeight).toBeLessThanOrEqual(
+        dimensions.previewCopyHeight + 1,
+      );
+    }
     if (viewport.width > 760) await expect(messageItem).toBeVisible();
     await expect(previewPanel).toBeVisible();
   }
@@ -449,7 +460,12 @@ test("HTML email styles and links render inside a script-isolated frame", async 
     return {
       bodyHeight: bodyRect?.height ?? 0,
       bodyWidth: bodyRect?.width ?? 0,
+      documentClientHeight: frameDocument?.documentElement.clientHeight ?? 0,
+      documentHeight: frameDocument?.documentElement.scrollHeight ?? 0,
       documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
+      documentOverflowY: frameDocument
+        ? getComputedStyle(frameDocument.documentElement).overflowY
+        : "",
       frameHeight: frame.getBoundingClientRect().height,
       frameWidth: frame.clientWidth,
       scale: frameDocument?.body?.style.transform ?? "",
@@ -458,7 +474,9 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   });
   expect(frameMetrics.bodyHeight).toBeGreaterThan(0);
   expect(frameMetrics.documentWidth).toBeLessThanOrEqual(frameMetrics.frameWidth);
-  expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.bodyHeight - 2);
+  expect(frameMetrics.bodyHeight).toBeGreaterThan(frameMetrics.frameHeight);
+  expect(frameMetrics.documentHeight).toBeGreaterThan(frameMetrics.documentClientHeight);
+  expect(frameMetrics.documentOverflowY).toBe("auto");
   expect(frameMetrics.bodyWidth).toBeGreaterThanOrEqual(frameMetrics.frameWidth - 2);
   expect(frameMetrics.scale).toContain("scale(");
   expect(frameMetrics.frameWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth);

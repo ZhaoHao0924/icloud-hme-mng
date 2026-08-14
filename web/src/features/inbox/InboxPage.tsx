@@ -203,7 +203,7 @@ function buildEmailHtmlDocument(rawHtml: string) {
       padding: 0;
       overflow-wrap: anywhere;
     }
-    html { overflow-x: hidden !important; }
+    html { overflow-x: hidden !important; overflow-y: auto; }
     body {
       overflow: visible !important;
       padding: 16px;
