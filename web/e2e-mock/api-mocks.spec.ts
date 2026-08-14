@@ -445,8 +445,10 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   const frameMetrics = await frameElement.evaluate((element) => {
     const frame = element as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
+    const bodyRect = frameDocument?.body?.getBoundingClientRect();
     return {
-      bodyHeight: frameDocument?.body?.getBoundingClientRect().height ?? 0,
+      bodyHeight: bodyRect?.height ?? 0,
+      bodyWidth: bodyRect?.width ?? 0,
       documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
       frameHeight: frame.getBoundingClientRect().height,
       frameWidth: frame.clientWidth,
@@ -457,8 +459,37 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   expect(frameMetrics.bodyHeight).toBeGreaterThan(0);
   expect(frameMetrics.documentWidth).toBeLessThanOrEqual(frameMetrics.frameWidth);
   expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.bodyHeight - 2);
+  expect(frameMetrics.bodyWidth).toBeGreaterThanOrEqual(frameMetrics.frameWidth - 2);
   expect(frameMetrics.scale).toContain("scale(");
   expect(frameMetrics.frameWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth);
+
+  const imageMetrics = await frameElement.evaluate((element) => {
+    const frameDocument = (element as HTMLIFrameElement).contentDocument;
+    const image = frameDocument?.querySelector<HTMLImageElement>("img");
+    const rect = image?.getBoundingClientRect();
+    const bodyRect = frameDocument?.body?.getBoundingClientRect();
+    return {
+      bodyBottom: bodyRect?.bottom ?? 0,
+      bodyRight: bodyRect?.right ?? 0,
+      height: rect?.height ?? 0,
+      naturalHeight: image?.naturalHeight ?? 0,
+      naturalWidth: image?.naturalWidth ?? 0,
+      objectFit: image?.style.objectFit ?? "",
+      right: rect?.right ?? 0,
+      width: rect?.width ?? 0,
+    };
+  });
+  expect(imageMetrics.naturalWidth).toBeGreaterThan(0);
+  expect(imageMetrics.naturalHeight).toBeGreaterThan(0);
+  expect(imageMetrics.width).toBeGreaterThan(0);
+  expect(imageMetrics.height).toBeGreaterThan(0);
+  expect(imageMetrics.objectFit).toBe("contain");
+  expect(imageMetrics.right).toBeLessThanOrEqual(imageMetrics.bodyRight + 1);
+  expect(imageMetrics.height / imageMetrics.width).toBeCloseTo(
+    imageMetrics.naturalHeight / imageMetrics.naturalWidth,
+    2,
+  );
+  expect(imageMetrics.bodyBottom).toBeGreaterThanOrEqual(imageMetrics.height);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator(".inbox-preview-panel")).toHaveCount(0);
@@ -468,11 +499,22 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   const mobileFrameMetrics = await mobileFrame.evaluate((element) => {
     const frame = element as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
+    const image = frameDocument?.querySelector<HTMLImageElement>("img");
+    const imageRect = image?.getBoundingClientRect();
+    const bodyRect = frameDocument?.body?.getBoundingClientRect();
     return {
-      bodyHeight: frameDocument?.body?.getBoundingClientRect().height ?? 0,
+      bodyHeight: bodyRect?.height ?? 0,
+      bodyRight: bodyRect?.right ?? 0,
+      bodyWidth: bodyRect?.width ?? 0,
       documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
       frameHeight: frame.getBoundingClientRect().height,
       frameWidth: frame.clientWidth,
+      imageHeight: imageRect?.height ?? 0,
+      imageNaturalHeight: image?.naturalHeight ?? 0,
+      imageNaturalWidth: image?.naturalWidth ?? 0,
+      imageObjectFit: image?.style.objectFit ?? "",
+      imageRight: imageRect?.right ?? 0,
+      imageWidth: imageRect?.width ?? 0,
       scale: frameDocument?.body?.style.transform ?? "",
       viewportWidth: window.innerWidth,
     };
@@ -480,6 +522,15 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   expect(mobileFrameMetrics.bodyHeight).toBeGreaterThan(0);
   expect(mobileFrameMetrics.documentWidth).toBeLessThanOrEqual(mobileFrameMetrics.frameWidth);
   expect(mobileFrameMetrics.frameHeight).toBeGreaterThanOrEqual(mobileFrameMetrics.bodyHeight - 2);
+  expect(mobileFrameMetrics.bodyWidth).toBeGreaterThanOrEqual(mobileFrameMetrics.frameWidth - 2);
+  expect(mobileFrameMetrics.imageNaturalWidth).toBeGreaterThan(0);
+  expect(mobileFrameMetrics.imageNaturalHeight).toBeGreaterThan(0);
+  expect(mobileFrameMetrics.imageObjectFit).toBe("contain");
+  expect(mobileFrameMetrics.imageRight).toBeLessThanOrEqual(mobileFrameMetrics.bodyRight + 1);
+  expect(mobileFrameMetrics.imageHeight / mobileFrameMetrics.imageWidth).toBeCloseTo(
+    mobileFrameMetrics.imageNaturalHeight / mobileFrameMetrics.imageNaturalWidth,
+    2,
+  );
   expect(mobileFrameMetrics.scale).toContain("scale(");
   expect(mobileFrameMetrics.frameWidth).toBeLessThanOrEqual(mobileFrameMetrics.viewportWidth);
 });

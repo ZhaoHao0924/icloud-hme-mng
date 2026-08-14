@@ -1052,7 +1052,7 @@ export function createMockHandlers(
       if (getScenario() === "inbox-html") {
         return successResponse({
           ...message,
-          body: `<!doctype html><html><head><style>.action { display: inline-block; padding: 10px 14px; color: white; background: #1463d2; }</style></head><body><table style="width: 960px"><tr><td><p>请继续完成操作。</p><a class="action" href="https://example.test/continue">打开链接</a><p>unbroken-email-content-${"x".repeat(180)}</p><img alt="宽版图片" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='480'%3E%3Crect width='960' height='480' fill='%2355bff0'/%3E%3C/svg%3E" style="min-width: 960px !important; width: 960px !important; height: 480px !important" /></td></tr></table><script>window.top.location = "https://attacker.test"</script></body></html>`,
+          body: `<!doctype html><html><head><style>.action { display: inline-block; padding: 10px 14px; color: white; background: #1463d2; }</style></head><body><div aria-hidden="true" style="min-width: 960px !important; width: 960px !important; height: 8px !important"></div><table style="width: 960px"><tr><td><p>请继续完成操作。</p><a class="action" href="https://example.test/continue">打开链接</a><p>unbroken-email-content-${"x".repeat(180)}</p><img alt="宽版图片" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='480'%3E%3Crect width='960' height='480' fill='%2355bff0'/%3E%3C/svg%3E" style="min-width: 960px !important; width: 960px !important; height: 480px !important" /></td></tr></table><script>window.top.location = "https://attacker.test"</script></body></html>`,
           content_type: "text/html",
           preview: "请继续完成操作。",
         });

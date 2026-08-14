@@ -169,6 +169,17 @@ function buildEmailHtmlDocument(rawHtml: string) {
     if (source) image.src = source;
     else image.removeAttribute("src");
     image.removeAttribute("srcset");
+    image.removeAttribute("width");
+    image.removeAttribute("height");
+    image.style.setProperty("display", "block", "important");
+    image.style.setProperty("width", "auto", "important");
+    image.style.setProperty("height", "auto", "important");
+    image.style.setProperty("aspect-ratio", "auto", "important");
+    image.style.setProperty("min-width", "0", "important");
+    image.style.setProperty("max-width", "100%", "important");
+    image.style.setProperty("max-height", "none", "important");
+    image.style.setProperty("object-fit", "contain", "important");
+    image.style.setProperty("object-position", "left top", "important");
   });
 
   const policy = documentNode.createElement("meta");
@@ -190,12 +201,23 @@ function buildEmailHtmlDocument(rawHtml: string) {
       min-height: 0 !important;
       margin: 0 !important;
       padding: 0;
-      overflow-x: hidden !important;
       overflow-wrap: anywhere;
     }
-    body { padding: 16px; color: #202326; background: #fff; font: 14px/1.55 system-ui, sans-serif; }
+    html { overflow-x: hidden !important; }
+    body {
+      overflow: visible !important;
+      padding: 16px;
+      color: #202326;
+      background: #fff;
+      font: 14px/1.55 system-ui, sans-serif;
+    }
     body * { max-width: 100% !important; min-width: 0 !important; overflow-wrap: anywhere; }
-    img, video, canvas, svg { max-width: 100% !important; height: auto !important; }
+    img, video, canvas, svg {
+      max-width: 100% !important;
+      height: auto !important;
+      object-fit: contain !important;
+      object-position: left top !important;
+    }
     table { width: 100% !important; max-width: 100% !important; min-width: 0 !important; table-layout: fixed !important; }
     td, th { max-width: 100% !important; min-width: 0 !important; overflow-wrap: anywhere !important; word-break: break-word !important; }
     pre { max-width: 100% !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; }
@@ -228,7 +250,10 @@ function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
     const documentElement = frameDocument?.documentElement;
     if (!frame || !frameDocument || !frameBody || !documentElement) return;
 
-    frameBody.style.transform = "none";
+    frameBody.style.setProperty("width", "100%", "important");
+    frameBody.style.setProperty("max-width", "100%", "important");
+    frameBody.style.setProperty("overflow", "visible", "important");
+    frameBody.style.setProperty("transform", "none", "important");
     const bodyRect = frameBody.getBoundingClientRect();
     const viewportWidth = Math.max(frame.clientWidth, documentElement.clientWidth);
     const widestContent = Array.from(frameBody.querySelectorAll("*")).reduce(
@@ -242,8 +267,10 @@ function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
       viewportWidth > 0 && widestContent > viewportWidth
         ? Math.min(1, viewportWidth / widestContent)
         : 1;
-    frameBody.style.transformOrigin = "top left";
-    frameBody.style.transform = scale < 1 ? `scale(${scale})` : "";
+    if (scale < 1) {
+      frameBody.style.setProperty("width", `${widestContent}px`, "important");
+      frameBody.style.setProperty("max-width", "none", "important");
+    }
 
     const measuredHeight = [documentElement, frameBody]
       .filter((element): element is HTMLElement => element !== null)
@@ -257,6 +284,8 @@ function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
           ),
         0,
       );
+    frameBody.style.setProperty("transform-origin", "top left", "important");
+    frameBody.style.setProperty("transform", scale < 1 ? `scale(${scale})` : "none", "important");
     const scaledHeight = Math.ceil(measuredHeight * scale);
     if (scaledHeight <= 0) return;
     setFrameHeight((currentHeight) =>
