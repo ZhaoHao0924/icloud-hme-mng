@@ -52,6 +52,24 @@ async function expectReachable(
   );
 }
 
+async function expectDialogFitsVisualViewport(
+  page: import("@playwright/test").Page,
+  dialog: import("@playwright/test").Locator,
+) {
+  await expectReachable(page, dialog);
+
+  const styles = await dialog.evaluate((element) => {
+    const computed = getComputedStyle(element);
+    return {
+      maxBlockSize: computed.maxBlockSize,
+      overflowY: computed.overflowY,
+    };
+  });
+
+  expect(styles.maxBlockSize).not.toBe("none");
+  expect(styles.overflowY).toBe("auto");
+}
+
 for (const viewport of qa010Viewports) {
   test(`QA-010 core workflows remain usable at ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
@@ -80,7 +98,7 @@ for (const viewport of qa010Viewports) {
     await page.keyboard.press("Enter");
 
     const addAccountDialog = page.getByRole("dialog", { name: "添加账户" });
-    await expectReachable(page, addAccountDialog);
+    await expectDialogFitsVisualViewport(page, addAccountDialog);
     await expectReachable(
       page,
       addAccountDialog.getByRole("button", { name: "添加账户", exact: true }),
@@ -99,7 +117,7 @@ for (const viewport of qa010Viewports) {
     await page.keyboard.press("Enter");
 
     const createAliasDialog = page.getByRole("dialog", { name: "创建别名" });
-    await expectReachable(page, createAliasDialog);
+    await expectDialogFitsVisualViewport(page, createAliasDialog);
     await expectReachable(
       page,
       createAliasDialog.getByRole("button", { name: "创建别名", exact: true }),
@@ -107,6 +125,17 @@ for (const viewport of qa010Viewports) {
     await page.keyboard.press("Escape");
     await expect(createAliasDialog).toHaveCount(0);
     await expect(createAlias).toBeFocused();
+
+    const deleteAlias = page.locator(".alias-delete-button").first();
+    await expectReachable(page, deleteAlias);
+    await deleteAlias.click();
+
+    const deleteAliasDialog = page.getByRole("alertdialog");
+    await expectDialogFitsVisualViewport(page, deleteAliasDialog);
+    await expectReachable(page, deleteAliasDialog.getByRole("button").last());
+    await page.keyboard.press("Escape");
+    await expect(deleteAliasDialog).toHaveCount(0);
+    await expect(deleteAlias).toBeFocused();
 
     await page.goto("/accounts/acc_primary/security?mock=success");
     await waitForMockWorker(page, "凭据");
@@ -128,5 +157,25 @@ for (const viewport of qa010Viewports) {
     await expectNoHorizontalOverflow(page);
     await expectReachable(page, page.getByRole("button", { name: "刷新日志" }));
     await expect(page.getByRole("list", { name: "最近操作记录" })).toBeVisible();
+
+    await page.goto("/accounts/acc_primary/automation?mock=success");
+    await waitForMockWorker(page, "自动化");
+    await expectNoHorizontalOverflow(page);
+
+    const saveAutomationRule = page.locator(".automation-actions .button-primary");
+    await expectReachable(page, saveAutomationRule);
+    if (viewport.width <= 760) {
+      const [actionBounds, buttonBounds] = await Promise.all([
+        page.locator(".automation-actions").boundingBox(),
+        saveAutomationRule.boundingBox(),
+      ]);
+
+      if (!actionBounds || !buttonBounds) {
+        throw new Error("Expected mobile automation actions to have layout boxes");
+      }
+
+      expect(buttonBounds.x).toBeCloseTo(actionBounds.x, 0);
+      expect(buttonBounds.width).toBeCloseTo(actionBounds.width, 0);
+    }
   });
 }

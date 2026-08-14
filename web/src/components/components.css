@@ -206,13 +206,20 @@
   top: 50%;
   left: 50%;
   width: min(440px, calc(100vw - 32px));
+  max-block-size: calc(var(--app-visual-viewport-height, 100dvh) - 32px);
   display: grid;
   gap: var(--space-3);
   padding: var(--space-6);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: var(--space-4);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: 0 18px 48px rgb(32 35 38 / 24%);
+  scrollbar-color: var(--color-border-strong) transparent;
+  scrollbar-width: thin;
   transform: translate(-50%, -50%);
 }
 
@@ -249,11 +256,21 @@
   }
 
   .dialog-content {
+    top: calc(16px + env(safe-area-inset-top));
+    max-block-size: calc(
+      var(--app-visual-viewport-height, 100dvh) - 32px - env(safe-area-inset-top) -
+        env(safe-area-inset-bottom)
+    );
     padding: var(--space-5);
+    transform: translateX(-50%);
   }
 
   .dialog-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .dialog-actions .button {
+    min-width: 0;
   }
 }

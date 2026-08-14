@@ -11,6 +11,28 @@ async function waitForMockWorker(page: import("@playwright/test").Page, pageTitl
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
 }
 
+async function expectFilterOptionsAligned(
+  page: import("@playwright/test").Page,
+  input: import("@playwright/test").Locator,
+) {
+  await input.click();
+  const listbox = page.getByRole("listbox");
+  await expect(listbox).toBeVisible();
+
+  const [inputBounds, listboxBounds] = await Promise.all([
+    input.boundingBox(),
+    listbox.boundingBox(),
+  ]);
+  if (!inputBounds || !listboxBounds) {
+    throw new Error("Expected inbox filter input and options to have layout boxes");
+  }
+
+  expect(Math.abs(inputBounds.x - listboxBounds.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(inputBounds.width - listboxBounds.width)).toBeLessThanOrEqual(1);
+  await input.press("Escape");
+  await expect(listbox).toHaveCount(0);
+}
+
 async function browserPersistenceSnapshot(page: import("@playwright/test").Page) {
   return page.evaluate(async () => {
     function storageEntries(storage: Storage) {
@@ -156,6 +178,16 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
   await expect(messageList).toContainText("登录确认");
   await expect(page.getByRole("region", { name: "登录确认" })).toBeVisible();
 
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expectFilterOptionsAligned(page, accountInput);
+    await expectFilterOptionsAligned(page, aliasInput);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   await page.getByRole("button", { name: "选择邮件 新设备登录提醒" }).click();
   await expect(page.getByRole("region", { name: "新设备登录提醒" })).toContainText(
     "Apple <no_reply@email.apple.com>",
@@ -167,8 +199,8 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
       url.pathname === "/api/inbox" && url.searchParams.get("alias") === "quiet-orchid@icloud.com"
     );
   });
-  await aliasInput.fill("quiet-orchid@icloud.com");
-  await aliasInput.press("Enter");
+  await aliasInput.click();
+  await page.getByRole("option", { name: /quiet-orchid@icloud\.com\s*GitHub/ }).click();
   await filteredRequest;
   await expect(page).toHaveURL(/mock=success.*source=workspace.*alias=quiet-orchid%40icloud.com/);
   await expect(aliasInput).toHaveValue("quiet-orchid@icloud.com");
@@ -200,8 +232,8 @@ test("inbox filters keep account context, preserve URL state, and fit responsive
   await refreshRequest;
   await expect(page).toHaveURL(/alias=quiet-orchid%40icloud.com.*days=3.*limit=50/);
 
-  await accountInput.fill("pending@icloud.com.cn");
-  await accountInput.press("Enter");
+  await accountInput.click();
+  await page.getByRole("option", { name: /pending@icloud\.com\.cn\s*待登录账号/ }).click();
   await expect(page).toHaveURL(
     /\/accounts\/acc_pending\/inbox\?mock=success&source=workspace&days=3&limit=50$/,
   );

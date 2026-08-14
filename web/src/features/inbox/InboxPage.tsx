@@ -47,35 +47,138 @@ function useMediaQuery(query: string) {
 
 type DraftFilterInputProps = Omit<
   InputHTMLAttributes<HTMLInputElement>,
-  "defaultValue" | "onBlur" | "onChange" | "onKeyDown" | "value"
+  "defaultValue" | "list" | "onBlur" | "onChange" | "onFocus" | "onKeyDown" | "value"
 > & {
+  options: Array<{ detail?: string; value: string }>;
   value: string;
   onCommit: (value: string) => string | void;
 };
 
-function DraftFilterInput({ onCommit, value, ...props }: DraftFilterInputProps) {
+function DraftFilterInput({ onCommit, options, value, ...props }: DraftFilterInputProps) {
   const [draft, setDraft] = useState(value);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [filtering, setFiltering] = useState(false);
+  const lastCommittedValue = useRef(value);
+  const inputId = props.id ?? "inbox-filter";
+  const optionListId = `${inputId}-options`;
+  const filter = filtering ? draft.trim().toLocaleLowerCase() : "";
+  const matchingOptions = filter
+    ? options.filter(({ detail, value: optionValue }) =>
+        `${optionValue} ${detail ?? ""}`.toLocaleLowerCase().includes(filter),
+      )
+    : options;
+  const hasOptions = open && matchingOptions.length > 0;
 
-  function commitDraft() {
-    const committedValue = onCommit(draft);
-    if (typeof committedValue === "string") {
-      setDraft(committedValue);
-    }
+  function commitValue(nextValue: string) {
+    const committedValue = onCommit(nextValue);
+    const resolvedValue = typeof committedValue === "string" ? committedValue : nextValue;
+    lastCommittedValue.current = resolvedValue;
+    setDraft(resolvedValue);
+    setFiltering(false);
+    setOpen(false);
+    setActiveIndex(-1);
   }
 
+  function commitDraft() {
+    setFiltering(false);
+    setOpen(false);
+    setActiveIndex(-1);
+    if (draft === lastCommittedValue.current) return;
+    commitValue(draft);
+  }
+
+  function selectOption(option: { detail?: string; value: string }) {
+    commitValue(option.value);
+  }
+
+  function moveActiveOption(direction: -1 | 1) {
+    setOpen(true);
+    setActiveIndex((current) => {
+      if (matchingOptions.length === 0) return -1;
+      if (current < 0) return direction > 0 ? 0 : matchingOptions.length - 1;
+      return (current + direction + matchingOptions.length) % matchingOptions.length;
+    });
+  }
+
+  const activeOption = activeIndex >= 0 ? matchingOptions[activeIndex] : undefined;
+
   return (
-    <input
-      {...props}
-      value={draft}
-      onBlur={commitDraft}
-      onChange={(event) => setDraft(event.target.value)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commitDraft();
-        }
-      }}
-    />
+    <div className="inbox-filter-combobox">
+      <input
+        {...props}
+        aria-activedescendant={activeOption ? `${optionListId}-${activeIndex}` : undefined}
+        aria-autocomplete="list"
+        aria-controls={hasOptions ? optionListId : undefined}
+        aria-expanded={hasOptions}
+        role="combobox"
+        value={draft}
+        onBlur={commitDraft}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setFiltering(true);
+          setOpen(true);
+          setActiveIndex(-1);
+        }}
+        onFocus={() => {
+          setFiltering(false);
+          setOpen(true);
+          setActiveIndex(-1);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            moveActiveOption(1);
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            moveActiveOption(-1);
+            return;
+          }
+          if (event.key === "Escape") {
+            if (!open) return;
+            event.preventDefault();
+            setDraft(value);
+            lastCommittedValue.current = value;
+            setFiltering(false);
+            setOpen(false);
+            setActiveIndex(-1);
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            if (activeOption) {
+              selectOption(activeOption);
+            } else {
+              commitDraft();
+            }
+          }
+        }}
+      />
+      {hasOptions ? (
+        <ul className="inbox-filter-options" id={optionListId} role="listbox">
+          {matchingOptions.map((option, index) => (
+            <li
+              aria-selected={index === activeIndex}
+              className="inbox-filter-option"
+              id={`${optionListId}-${index}`}
+              key={option.value}
+              role="option"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                selectOption(option);
+              }}
+            >
+              <span className="inbox-filter-option-value">{option.value}</span>
+              {option.detail ? (
+                <span className="inbox-filter-option-detail">{option.detail}</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -636,7 +739,10 @@ export function InboxPage() {
           <DraftFilterInput
             key={`account-${account.id}-${accountFilterValue(account)}`}
             id="inbox-account"
-            list="inbox-account-options"
+            options={accounts.map((candidate) => ({
+              detail: candidate.name,
+              value: accountFilterValue(candidate),
+            }))}
             value={accountFilterValue(account)}
             autoCapitalize="none"
             autoComplete="off"
@@ -644,15 +750,6 @@ export function InboxPage() {
             spellCheck={false}
             onCommit={commitAccountInput}
           />
-          <datalist id="inbox-account-options">
-            {accounts.map((candidate) => (
-              <option
-                key={candidate.id}
-                label={candidate.name}
-                value={accountFilterValue(candidate)}
-              />
-            ))}
-          </datalist>
         </div>
 
         <div className="form-field">
@@ -660,7 +757,7 @@ export function InboxPage() {
           <DraftFilterInput
             key={`alias-${selectedAlias}`}
             id="inbox-alias"
-            list="inbox-alias-options"
+            options={aliases.map((alias) => ({ detail: alias.label, value: alias.email }))}
             value={selectedAlias}
             aria-describedby="inbox-alias-help"
             autoCapitalize="none"
@@ -670,14 +767,6 @@ export function InboxPage() {
             spellCheck={false}
             onCommit={updateAlias}
           />
-          <datalist id="inbox-alias-options">
-            {aliases.map((alias) => (
-              <option key={alias.anonymousId} value={alias.email}>
-                {alias.email}
-                {alias.label ? ` · ${alias.label}` : ""}
-              </option>
-            ))}
-          </datalist>
         </div>
 
         <div className="form-field">

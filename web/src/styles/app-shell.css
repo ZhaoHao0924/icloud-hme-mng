@@ -1362,6 +1362,71 @@
   align-self: end;
 }
 
+.inbox-filter-combobox {
+  position: relative;
+  min-width: 0;
+}
+
+.inbox-filter-combobox > input {
+  width: 100%;
+}
+
+.inbox-filter-options {
+  position: absolute;
+  z-index: 12;
+  inset-block-start: calc(100% + 4px);
+  inset-inline: 0;
+  max-block-size: min(17rem, 45vh);
+  margin: 0;
+  padding: var(--space-1) 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 24px rgb(32 35 38 / 16%);
+  list-style: none;
+  scrollbar-color: var(--color-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.inbox-filter-option {
+  min-width: 0;
+  min-height: 42px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 7px var(--space-3);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.inbox-filter-option:hover,
+.inbox-filter-option[aria-selected="true"] {
+  background: rgb(37 99 235 / 8%);
+}
+
+.inbox-filter-option-value,
+.inbox-filter-option-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-filter-option-value {
+  color: var(--color-text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  line-height: var(--line-height-normal);
+}
+
+.inbox-filter-option-detail {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
 .inbox-toolbar input,
 .inbox-toolbar select {
   min-width: 0;
@@ -2430,7 +2495,8 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-    padding: 10px 14px;
+    padding: calc(10px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) 10px
+      calc(14px + env(safe-area-inset-left));
     border-right: 0;
     border-bottom: 1px solid var(--color-sidebar-border);
   }
@@ -2488,7 +2554,14 @@
   }
 
   .content {
-    padding: 22px 18px var(--space-9);
+    padding: 22px calc(18px + env(safe-area-inset-right))
+      calc(var(--space-9) + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
+  }
+
+  .section-heading,
+  .credential-section-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .table-header {
@@ -2535,6 +2608,10 @@
   .automation-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .automation-actions .button-primary {
+    grid-column: 1 / -1;
   }
 
   .account-status-item {

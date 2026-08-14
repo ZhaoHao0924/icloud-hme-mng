@@ -42,6 +42,23 @@ export function App() {
   const { isLoggingOut, logout, status } = usePlatformAuth();
 
   useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+
+    const root = document.documentElement;
+    const updateViewportHeight = () => {
+      root.style.setProperty("--app-visual-viewport-height", `${Math.round(viewport.height)}px`);
+    };
+
+    updateViewportHeight();
+    viewport.addEventListener("resize", updateViewportHeight);
+    return () => {
+      viewport.removeEventListener("resize", updateViewportHeight);
+      root.style.removeProperty("--app-visual-viewport-height");
+    };
+  }, []);
+
+  useEffect(() => {
     if (!mobileMenuOpen) return;
 
     function handlePointerDown(event: PointerEvent) {

@@ -126,14 +126,18 @@ describe("InboxPage", () => {
     expect(aliasInput).toHaveValue("");
     expect(screen.getByLabelText("时间范围")).toHaveValue("7");
     expect(screen.getByLabelText("数量")).toHaveValue("20");
-    expect(aliasInput).toHaveAttribute("list", "inbox-alias-options");
-    await waitFor(() =>
-      expect(
-        document.querySelector(
-          'datalist#inbox-alias-options option[value="quiet-orchid@icloud.com"]',
-        ),
-      ).not.toBeNull(),
-    );
+    expect(aliasInput).toHaveAttribute("role", "combobox");
+    expect(aliasInput).toHaveAttribute("aria-autocomplete", "list");
+    await user.click(aliasInput);
+    const aliasOptions = await screen.findByRole("listbox");
+    const quietOrchidOption = within(aliasOptions).getByRole("option", {
+      name: /quiet-orchid@icloud\.com\s*GitHub/,
+    });
+    expect(quietOrchidOption).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("{ArrowDown}");
+    expect(quietOrchidOption).toHaveAttribute("aria-selected", "true");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(screen.getByText("3 封邮件")).toBeInTheDocument();
     expect(screen.getByLabelText("实际读取方式：IMAP")).toBeInTheDocument();
     expect(requests.at(-1)?.searchParams.get("account_id")).toBe("acc_primary");
