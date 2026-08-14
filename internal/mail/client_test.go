@@ -272,6 +272,50 @@ func TestGetPreviewFetchesOnlyTheRequestedMessage(t *testing.T) {
 	}
 }
 
+func TestGetFullFetchesCompleteBodyForDetailView(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	session := &fakeIMAPSession{
+		fetchMessages: []*imap.Message{
+			newTestIMAPMessage(7, now, "selected message body"),
+		},
+	}
+	client := NewClient("user@example.com", "app-password")
+	client.cli = session
+
+	message, err := client.GetFull(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.fetchSet != "7" {
+		t.Fatalf("UID fetch set = %q, want 7", session.fetchSet)
+	}
+	if !containsFetchItem(session.fetchItems, "BODY.PEEK[]") {
+		t.Fatalf("fetch items = %v, want complete BODY.PEEK[]", session.fetchItems)
+	}
+	if containsFetchItem(session.fetchItems, string(imap.FetchRFC822)) {
+		t.Fatalf("fetch items = %v, must not use RFC822", session.fetchItems)
+	}
+	if message.ID != "7" || message.Body != "selected message body" || message.Preview != "selected message body" {
+		t.Fatalf("message = %+v, want complete selected message body", message)
+	}
+	if message.ContentType != "text/plain" {
+		t.Fatalf("content type = %q, want text/plain", message.ContentType)
+	}
+}
+
+func TestGetFullReportsMissingBodyInsteadOfReturningAnEmptyDetail(t *testing.T) {
+	session := &fakeIMAPSession{
+		fetchMessages: []*imap.Message{{Uid: 7}},
+	}
+	client := NewClient("user@example.com", "app-password")
+	client.cli = session
+
+	_, err := client.GetFull(7)
+	if err == nil || !strings.Contains(err.Error(), "未返回邮件正文") {
+		t.Fatalf("GetFull() error = %v, want missing body error", err)
+	}
+}
+
 func TestSelectedInboxIsReusedAcrossSummaryAndPreviewFetches(t *testing.T) {
 	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
 	session := &fakeIMAPSession{

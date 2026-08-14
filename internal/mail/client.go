@@ -558,32 +558,85 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(uid)
 
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, imap.FetchRFC822}
+	section := fullBodySection()
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
 	messages := make(chan *imap.Message, 1)
 	done := make(chan error, 1)
 	go func() {
 		done <- c.cli.UidFetch(seqset, items, messages)
 	}()
 
-	msg := <-messages
+	msg, ok := <-messages
+	if !ok || msg == nil {
+		if err := <-done; err != nil {
+			c.resetSelectedMailbox()
+			return nil, err
+		}
+		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
+	}
+
+	// The body reader belongs to this FETCH response, so consume it before
+	// waiting for the command to finish. This also matches the go-imap usage
+	// pattern for literal message bodies.
+	full, parseErr := fullMessageFromIMAP(msg, section)
 	if err := <-done; err != nil {
 		c.resetSelectedMailbox()
 		return nil, err
 	}
-	if msg == nil {
-		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
-	}
-
-	full := &FullMessage{Message: toMessage(msg)}
-	if r := msg.GetBody(&imap.BodySectionName{}); r != nil {
-		if em, err := mail.ReadMessage(r); err == nil {
-			body, contentType, preview, _ := readRenderableBody(em)
-			full.Body = body
-			full.ContentType = contentType
-			full.Preview = preview
-		}
+	if parseErr != nil {
+		return nil, parseErr
 	}
 	return full, nil
+}
+
+func fullBodySection() *imap.BodySectionName {
+	return &imap.BodySectionName{Peek: true}
+}
+
+func fullMessageFromIMAP(msg *imap.Message, section *imap.BodySectionName) (*FullMessage, error) {
+	r := fullMessageBody(msg, section)
+	if r == nil {
+		return nil, errors.New("IMAP 未返回邮件正文")
+	}
+	em, err := mail.ReadMessage(r)
+	if err != nil {
+		return nil, fmt.Errorf("解析邮件正文失败: %w", err)
+	}
+	body, contentType, preview, err := readRenderableBody(em)
+	if err != nil {
+		return nil, fmt.Errorf("解析邮件正文失败: %w", err)
+	}
+	message := toMessage(msg)
+	message.Preview = preview
+	return &FullMessage{
+		Message:     message,
+		Body:        body,
+		ContentType: contentType,
+	}, nil
+}
+
+// fullMessageBody accepts the standard BODY[] response and the BODY[]<0>
+// variant returned by some IMAP servers for an unbounded body request.
+func fullMessageBody(msg *imap.Message, section *imap.BodySectionName) io.Reader {
+	if body := msg.GetBody(section); body != nil {
+		return body
+	}
+	for responseSection, body := range msg.Body {
+		if responseSection == nil ||
+			len(responseSection.Path) != 0 ||
+			responseSection.Specifier != imap.EntireSpecifier ||
+			len(responseSection.Fields) != 0 ||
+			responseSection.NotFields ||
+			len(responseSection.Partial) != 1 ||
+			responseSection.Partial[0] != 0 {
+			continue
+		}
+		if body == nil {
+			return strings.NewReader("")
+		}
+		return body
+	}
+	return nil
 }
 
 // ---- 解析工具 ----
