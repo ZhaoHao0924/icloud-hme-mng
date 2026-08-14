@@ -335,7 +335,7 @@ describe("InboxPage", () => {
     renderInbox();
 
     const preview = await screen.findByRole("region", { name: "登录确认" });
-    expect(await within(preview).findByRole("alert")).toHaveTextContent("读取邮件超时");
+    expect(await within(preview).findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(screen.getByRole("list", { name: "邮件摘要列表" })).toBeInTheDocument();
 
     detailShouldFail = false;
@@ -431,7 +431,7 @@ describe("InboxPage", () => {
     );
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Apple 服务错误：读取邮件失败: Web API 回退不可用");
+    expect(alert).toHaveTextContent("Apple 服务暂时不可用");
     expect(screen.getByLabelText("别名")).toHaveValue("quiet-orchid@icloud.com");
     expect(screen.getByLabelText("时间范围")).toHaveValue("3");
     expect(screen.getByLabelText("数量")).toHaveValue("50");
@@ -456,8 +456,7 @@ describe("InboxPage", () => {
     renderInbox();
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("读取邮件超时");
-    expect(alert).toHaveTextContent("读取邮件超时，请稍后重试。");
+    expect(alert).toHaveTextContent("Apple 服务暂时不可用");
     expect(screen.getByRole("button", { name: "重新加载" })).toBeInTheDocument();
   });
 

@@ -242,7 +242,7 @@ describe("AliasesPage", () => {
     const dialog = screen.getByRole("alertdialog", { name: "确认删除别名？" });
     await user.click(within(dialog).getByRole("button", { name: "删除别名" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("模拟删除失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(deleteAttempts).toBe(1);
     expect(screen.getByRole("alertdialog", { name: "确认删除别名？" })).toBeInTheDocument();
     expect(screen.getByText("quiet-orchid@icloud.com")).toBeInTheDocument();
@@ -269,7 +269,7 @@ describe("AliasesPage", () => {
       }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("模拟停用失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(actionAttempts).toBe(1);
     expect(within(activeRow as HTMLTableRowElement).getByText("使用中")).toBeInTheDocument();
     expect(
@@ -371,7 +371,7 @@ describe("AliasesPage", () => {
     await user.type(labelInput, "失败后保留");
     await user.click(within(dialog).getByRole("button", { name: "创建别名" }));
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("模拟创建失败");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(labelInput).toHaveValue("失败后保留");
     expect(createAttempts).toBe(1);
     expect(screen.getByText("2 个别名")).toBeInTheDocument();
@@ -423,7 +423,7 @@ describe("AliasesPage", () => {
     renderAliases();
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Apple 服务错误：模拟别名服务错误");
+    expect(alert).toHaveTextContent("Apple 服务暂时不可用");
     expect(screen.getByRole("heading", { level: 2, name: "主账号" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "更新 Cookie" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建别名" })).not.toBeInTheDocument();
@@ -440,7 +440,13 @@ describe("AliasesPage", () => {
     server.use(
       http.get("*/api/aliases", () =>
         HttpResponse.json(
-          { message: "iCloud 会话失效，请更新 Cookie", success: false },
+          {
+            action: "update_cookie",
+            code: "icloud_session_expired",
+            message: "iCloud 会话失效，请更新 Cookie",
+            retryable: false,
+            success: false,
+          },
           { status: 401 },
         ),
       ),

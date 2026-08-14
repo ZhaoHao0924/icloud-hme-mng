@@ -8,7 +8,7 @@ import { AccountRequestErrorState } from "./SessionRecoveryView";
 import { readSessionRecoveryLocationState } from "./sessionRecoveryState";
 
 describe("SessionExpiredState", () => {
-  it.each([401, 403])("routes HTTP %i recovery to credentials with its source", async (status) => {
+  it("routes a confirmed session-expiry code to credentials with its source", async () => {
     const user = userEvent.setup();
     const router = createMemoryRouter(
       [
@@ -17,7 +17,14 @@ describe("SessionExpiredState", () => {
           element: (
             <AccountRequestErrorState
               accountId="acc_main"
-              error={new ApiError({ kind: "http", message: "upstream rejected", status })}
+              error={
+                new ApiError({
+                  code: "icloud_session_expired",
+                  kind: "http",
+                  message: "upstream rejected",
+                  status: 401,
+                })
+              }
             />
           ),
         },
@@ -41,6 +48,27 @@ describe("SessionExpiredState", () => {
     });
   });
 
+  it("does not route a bare HTTP 403 to Cookie recovery", () => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/accounts/:accountId/aliases",
+          element: (
+            <AccountRequestErrorState
+              accountId="acc_main"
+              error={new ApiError({ kind: "http", message: "upstream rejected", status: 403 })}
+            />
+          ),
+        },
+      ],
+      { initialEntries: ["/accounts/acc_main/aliases"] },
+    );
+    render(<RouterProvider router={router} />);
+
+    expect(screen.queryByRole("link", { name: "更新 Cookie" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Cookie 会话已过期");
+  });
+
   it("keeps non-session errors retryable without a credential link", async () => {
     const user = userEvent.setup();
     const onRetry = vi.fn();
@@ -54,7 +82,9 @@ describe("SessionExpiredState", () => {
               error={
                 new ApiError({
                   kind: "http",
+                  code: "icloud_service_unavailable",
                   message: "读取邮件失败",
+                  retryable: true,
                   status: 502,
                 })
               }
@@ -67,7 +97,7 @@ describe("SessionExpiredState", () => {
     );
     render(<RouterProvider router={router} />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Apple 服务错误：读取邮件失败");
+    expect(screen.getByRole("alert")).toHaveTextContent("Apple 服务暂时不可用，请稍后重试。");
     expect(screen.queryByRole("link", { name: "更新 Cookie" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新加载" }));
     expect(onRetry).toHaveBeenCalledOnce();

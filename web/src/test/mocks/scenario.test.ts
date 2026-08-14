@@ -7,7 +7,10 @@ describe("mock scenarios", () => {
     expect(parseMockScenario("otp")).toBe("otp");
     expect(parseMockScenario("expired")).toBe("expired");
     expect(parseMockScenario("alias-error")).toBe("alias-error");
+    expect(parseMockScenario("alias-entitlement")).toBe("alias-entitlement");
     expect(parseMockScenario("alias-forbidden")).toBe("alias-forbidden");
+    expect(parseMockScenario("alias-rate-limit")).toBe("alias-rate-limit");
+    expect(parseMockScenario("login-invalid")).toBe("login-invalid");
     expect(parseMockScenario("web-api")).toBe("web-api");
     expect(parseMockScenario("inbox-error")).toBe("inbox-error");
     expect(parseMockScenario("inbox-timeout")).toBe("inbox-timeout");

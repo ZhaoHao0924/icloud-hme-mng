@@ -60,17 +60,33 @@ function aliasFixturesForScenario(scenario: MockScenario) {
 function errorResponse() {
   return HttpResponse.json(
     {
+      action: "retry_later",
+      code: "icloud_service_unavailable",
       message: "模拟 Apple 服务错误",
+      retryable: true,
       success: false,
     },
     { status: 502 },
   );
 }
 
+function businessErrorResponse(
+  code: string,
+  status: number,
+  message: string,
+  action: string,
+  retryable = false,
+) {
+  return HttpResponse.json({ action, code, message, retryable, success: false }, { status });
+}
+
 function inboxTimeoutResponse() {
   return HttpResponse.json(
     {
+      action: "retry_later",
+      code: "icloud_service_unavailable",
       message: "读取邮件超时，请稍后重试。",
+      retryable: true,
       success: false,
     },
     { status: 504 },
@@ -84,7 +100,10 @@ function offlineResponse() {
 function sessionExpiredResponse(status = 401) {
   return HttpResponse.json(
     {
+      action: "update_cookie",
+      code: "icloud_session_expired",
       message: "iCloud 会话失效，请更新 Cookie",
+      retryable: false,
       success: false,
     },
     { status },
@@ -104,25 +123,67 @@ function aliasSessionFailureResponse(
   accountId: string,
 ) {
   const scenario = getScenario();
-  if (
-    (scenario === "expired" || scenario === "alias-forbidden") &&
-    !accountStore.hasRestoredSession(accountId)
-  ) {
-    return sessionExpiredResponse(scenario === "alias-forbidden" ? 403 : 401);
+  if (scenario === "expired" && !accountStore.hasRestoredSession(accountId)) {
+    return sessionExpiredResponse(401);
   }
   return null;
 }
 
 function aliasAppleServiceFailureResponse(getScenario: ScenarioReader) {
-  if (getScenario() === "alias-error") {
-    return errorResponse();
+  switch (getScenario()) {
+    case "alias-error":
+      return errorResponse();
+    case "alias-entitlement":
+      return businessErrorResponse(
+        "icloud_entitlement_required",
+        403,
+        "当前 Apple 账户未满足 Hide My Email 或 iCloud+ 使用资格，请确认账户权限后重试。",
+        "check_icloud_plus",
+      );
+    case "alias-limit":
+      return businessErrorResponse(
+        "alias_limit_reached",
+        409,
+        "Hide My Email 别名数量已达到上限，请清理不再使用的别名后重试。",
+        "review_alias_limits",
+      );
+    case "alias-rate-limit":
+      return businessErrorResponse(
+        "icloud_rate_limited",
+        429,
+        "Apple 暂时限制了请求频率，请稍后手动重试。",
+        "wait_before_retry",
+      );
+    case "alias-state-conflict":
+      return businessErrorResponse(
+        "request_state_conflict",
+        409,
+        "当前 Apple 资源状态与请求冲突，请刷新后再试。",
+        "refresh_state",
+      );
+    case "alias-trust":
+      return businessErrorResponse(
+        "icloud_device_trust_required",
+        403,
+        "Apple 要求完成设备信任或双重验证，请在 Apple 设备或官网登录后重试。",
+        "complete_device_trust",
+      );
+    default:
+      return null;
   }
-  return null;
 }
 
 function inboxFailureResponse(getScenario: ScenarioReader) {
   const scenario = getScenario();
   if (scenario === "inbox-error") return errorResponse();
+  if (scenario === "inbox-rate-limit") {
+    return businessErrorResponse(
+      "icloud_rate_limited",
+      429,
+      "Apple 暂时限制了请求频率，请稍后手动重试。",
+      "wait_before_retry",
+    );
+  }
   if (scenario === "inbox-timeout") return inboxTimeoutResponse();
   return null;
 }
@@ -471,7 +532,23 @@ export function createMockHandlers(
       if (!account) {
         return HttpResponse.json({ message: "账号不存在", success: false }, { status: 404 });
       }
-      if (getScenario() === "otp") {
+      if (getScenario() === "login-invalid") {
+        return businessErrorResponse(
+          "icloud_credentials_invalid",
+          401,
+          "Apple ID 或密码错误，请检查后重新登录。",
+          "restart_login",
+        );
+      }
+      if (getScenario() === "login-privacy") {
+        return businessErrorResponse(
+          "icloud_privacy_terms_required",
+          403,
+          "请先在 Apple 账户页面确认隐私条款，再重新登录。",
+          "accept_privacy_terms",
+        );
+      }
+      if (getScenario() === "otp" || getScenario() === "otp-invalid") {
         accountStore.issueLoginChallenge(accountId, otpChallengeFixture.challenge_id);
         return successResponse(otpChallengeFixture);
       }
@@ -514,6 +591,14 @@ export function createMockHandlers(
         return HttpResponse.json(
           { message: "登录 challenge 无效或已过期，请重新提交密码", success: false },
           { status: 410 },
+        );
+      }
+      if (getScenario() === "otp-invalid") {
+        return businessErrorResponse(
+          "icloud_otp_invalid",
+          401,
+          "双重认证验证码无效，请重新发起登录并输入最新验证码。",
+          "restart_login",
         );
       }
       const account = accountStore.get(accountId, fixturesForScenario(getScenario()));
@@ -899,6 +984,18 @@ export function createMockHandlers(
       if (failure) return failure;
       const aliasFailure = aliasAppleServiceFailureResponse(getScenario);
       if (aliasFailure) return aliasFailure;
+      if (getScenario() === "alias-forbidden") {
+        return HttpResponse.json(
+          {
+            action: "retry_later",
+            code: "icloud_upstream_rejected",
+            message: "Apple 拒绝了请求，暂时无法安全判断具体原因，请稍后重试。",
+            retryable: false,
+            success: false,
+          },
+          { status: 403 },
+        );
+      }
       const body = (await request.json()) as { account_id?: unknown; label?: unknown };
       const accountId = typeof body.account_id === "string" ? body.account_id.trim() : "";
       const label = typeof body.label === "string" ? body.label : "";

@@ -20,6 +20,7 @@ import (
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
+	"icloud-hme/internal/upstream"
 )
 
 // WebClientBuildNumber 是与浏览器一致的 mccgateway 邮件接口构建号。
@@ -173,11 +174,9 @@ func isSessionTrustChallenge(status int, body []byte) bool {
 }
 
 func webUpstreamError(operation string, status int, body []byte) error {
-	if isSessionTrustChallenge(status, body) {
-		return fmt.Errorf("iCloud session trust is no longer valid (HTTP %d)", status)
-	}
-	// Apple can include session and trust tokens in failure payloads.
-	return fmt.Errorf("%s: HTTP %d", operation, status)
+	// Apple can include session and trust tokens in failure payloads. The shared
+	// classifier retains only the status and allowlisted error code.
+	return fmt.Errorf("%s: %w", operation, upstream.ClassifyResponse(status, body))
 }
 
 // resolveMccGateway 从 validate 响应中获取 mccgateway URL。
@@ -205,7 +204,7 @@ func (c *WebClient) resolveMccGateway() error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -230,7 +229,7 @@ func (c *WebClient) resolveMccGateway() error {
 
 	rawMccURL := parsed.Webservices.Mccgateway.URL
 	if rawMccURL == "" {
-		return fmt.Errorf("未找到 mccgateway URL,响应: %s", truncate(string(body), 200))
+		return fmt.Errorf("未找到 mccgateway URL: %w", upstream.ClassifyResponse(http.StatusOK, body))
 	}
 	mccURL, err := normalizeMccGatewayURL(rawMccURL, c.host)
 	if err != nil {
@@ -344,7 +343,7 @@ func (c *WebClient) search(payload []byte) ([]webSearchResult, error) {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -361,7 +360,7 @@ func (c *WebClient) search(payload []byte) ([]webSearchResult, error) {
 		return nil, fmt.Errorf("解析邮件响应失败: %w", err)
 	}
 	if result.Success != nil && !*result.Success {
-		return nil, fmt.Errorf("获取邮件失败: %s", truncate(string(body), 300))
+		return nil, fmt.Errorf("获取邮件失败: %w", upstream.ClassifyResponse(200, body))
 	}
 	if len(result.ThreadList) == 0 || bytes.Equal(bytes.TrimSpace(result.ThreadList), []byte("null")) {
 		return nil, fmt.Errorf("解析邮件响应失败: 缺少 threadList 数组")
@@ -480,7 +479,7 @@ func (c *WebClient) fetchWebThreadRecipients(threadID string) ([]string, error) 
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -502,7 +501,7 @@ func (c *WebClient) fetchWebThreadRecipients(threadID string) ([]string, error) 
 		return nil, fmt.Errorf("解析邮件详情失败: %w", err)
 	}
 	if parsed.Success != nil && !*parsed.Success {
-		return nil, fmt.Errorf("读取邮件详情失败: %s", truncate(string(body), 300))
+		return nil, fmt.Errorf("读取邮件详情失败: %w", upstream.ClassifyResponse(http.StatusOK, body))
 	}
 	return extractWebRecipients(body), nil
 }

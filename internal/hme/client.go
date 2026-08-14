@@ -7,6 +7,7 @@ package hme
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"icloud-hme/internal/upstream"
 )
 
 const (
@@ -235,12 +237,7 @@ func isSessionTrustChallenge(status int, body []byte) bool {
 }
 
 func upstreamRequestError(status int, body []byte) error {
-	if isSessionTrustChallenge(status, body) {
-		return fmt.Errorf("iCloud session trust is no longer valid (HTTP %d)", status)
-	}
-	// Upstream bodies can include session and trust tokens. Do not surface them
-	// through the API response or verbose logs.
-	return fmt.Errorf("HTTP %d", status)
+	return upstream.ClassifyResponse(status, body)
 }
 
 // buildURL 给 URL 追加 clientBuildNumber / clientMasteringNumber / clientId / dsid 查询参数,
@@ -347,8 +344,8 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 
 		resp, err := c.httpc.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("连接失败: %w", err)
-			if attempt < maxAttempts {
+			lastErr = upstream.TransportError(err)
+			if attempt < maxAttempts && isRetryableUpstreamError(lastErr) {
 				c.sleepRetry(attempt)
 				continue
 			}
@@ -367,14 +364,7 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = upstreamRequestError(resp.StatusCode, text)
-			if isSessionTrustChallenge(resp.StatusCode, text) {
-				return "", lastErr
-			}
-			// 401/403 说明 Cookie 失效,不重试直接返回。
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				return "", lastErr
-			}
-			if attempt < maxAttempts {
+			if attempt < maxAttempts && isRetryableUpstreamError(lastErr) {
 				c.sleepRetry(attempt)
 				continue
 			}
@@ -387,6 +377,15 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		return "", lastErr
 	}
 	return "", fmt.Errorf("未知错误")
+}
+
+func isRetryableUpstreamError(err error) bool {
+	var classified *upstream.Error
+	return errors.As(err, &classified) && classified.Retryable
+}
+
+func classifySuccessfulResponseFailure(body []byte) error {
+	return upstream.ClassifyResponse(200, body)
 }
 
 func (c *Client) sleepRetry(attempt int) {
@@ -488,7 +487,7 @@ func (c *Client) ListAliases() ([]Alias, error) {
 		return nil, err
 	}
 	if success := gjson.Get(body, "success"); success.Exists() && !success.Bool() {
-		return nil, fmt.Errorf("HME 列表请求未获 iCloud 确认")
+		return nil, fmt.Errorf("HME 列表请求未获 iCloud 确认: %w", upstream.New(200, upstream.KindUnknownRejected, false))
 	}
 	aliases := parseAliasList(body)
 	c.log("共 %d 个别名", len(aliases))
@@ -507,8 +506,7 @@ func (c *Client) Generate() (string, error) {
 	}
 	parsed := gjson.Parse(body)
 	if !parsed.Get("success").Bool() {
-		errMsg := parsed.Get("error.errorMessage").String()
-		return "", fmt.Errorf("生成失败: %s", nonEmpty(errMsg, "unknown"))
+		return "", fmt.Errorf("生成失败: %w", classifySuccessfulResponseFailure(body))
 	}
 	hme := parsed.Get("result.hme").String()
 	if hme == "" {
@@ -542,8 +540,7 @@ func (c *Client) Reserve(hme, label string) (string, error) {
 	}
 	parsed := gjson.Parse(body)
 	if !parsed.Get("success").Bool() {
-		errMsg := parsed.Get("error.errorMessage").String()
-		return "", fmt.Errorf("保留失败: %s", nonEmpty(errMsg, "unknown"))
+		return "", fmt.Errorf("保留失败: %w", classifySuccessfulResponseFailure(body))
 	}
 	alias := hme
 	resultHme := parsed.Get("result.hme")
@@ -571,7 +568,7 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 	if maxRetries <= 0 {
 		maxRetries = 5
 	}
-	var lastErr string
+	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			c.serviceURL = ""
@@ -580,9 +577,9 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		hme, err := c.Generate()
 		if err != nil {
-			lastErr = "generate 失败: " + err.Error()
+			lastErr = fmt.Errorf("generate 失败: %w", err)
 			c.log("generate 失败")
-			if attempt < maxRetries-1 {
+			if attempt < maxRetries-1 && isRetryableUpstreamError(err) {
 				time.Sleep(time.Second)
 				continue
 			}
@@ -590,9 +587,9 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		email, err := c.Reserve(hme, label)
 		if err != nil {
-			lastErr = err.Error()
+			lastErr = fmt.Errorf("reserve 失败: %w", err)
 			c.log("reserve 失败")
-			if attempt < maxRetries-1 {
+			if attempt < maxRetries-1 && isRetryableUpstreamError(err) {
 				time.Sleep(time.Second)
 				continue
 			}
@@ -604,8 +601,8 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 			CreatedAt: time.Now().Format(time.RFC3339),
 		}, nil
 	}
-	if lastErr != "" {
-		return nil, fmt.Errorf("创建别名失败: %s", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("创建别名失败: %w", lastErr)
 	}
 	return nil, fmt.Errorf("创建别名失败,已重试 %d 次", maxRetries)
 }
@@ -647,9 +644,9 @@ func aliasActionConfirmation(body, action string) (bool, error) {
 		gjson.Get(body, "error.code").String(),
 	))
 	if code != "" {
-		return false, fmt.Errorf("iCloud 未确认%s操作 (%s)", action, code)
+		return false, fmt.Errorf("iCloud 未确认%s操作 (%s): %w", action, code, classifySuccessfulResponseFailure(body))
 	}
-	return false, fmt.Errorf("iCloud 未确认%s操作", action)
+	return false, fmt.Errorf("iCloud 未确认%s操作: %w", action, classifySuccessfulResponseFailure(body))
 }
 
 func safeAliasActionErrorCode(value string) string {
@@ -684,7 +681,7 @@ func (c *Client) Delete(anonymousID string) error {
 			return err
 		}
 		if !gjson.Get(body, "success").Bool() {
-			return fmt.Errorf("%s", gjson.Get(body, "error.errorMessage").String())
+			return fmt.Errorf("删除别名失败: %w", classifySuccessfulResponseFailure([]byte(body)))
 		}
 	}
 	c.log("已删除")

@@ -9,7 +9,6 @@
 package server
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/csv"
 	"errors"
@@ -360,10 +359,12 @@ func (s *Server) requireAPIToken(c *gin.Context) {
 // ---- 统一响应 ----
 
 type apiResp struct {
-	Success bool        `json:"success"`
-	Code    string      `json:"code,omitempty"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
+	Success   bool        `json:"success"`
+	Code      string      `json:"code,omitempty"`
+	Message   string      `json:"message,omitempty"`
+	Action    string      `json:"action,omitempty"`
+	Retryable *bool       `json:"retryable,omitempty"`
+	Data      interface{} `json:"data,omitempty"`
 }
 
 func ok(c *gin.Context, data interface{}) {
@@ -543,14 +544,7 @@ func (s *Server) createAlias(c *gin.Context) {
 			fail(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: "+err.Error())
 			return
 		}
-		// 区分会话失效(需重新登录)与临时失败
-		msg := err.Error()
-		if isSessionError(msg) {
-			s.notifySessionExpired(req.AccountID)
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效，请更新 Cookie")
-		} else {
-			failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "创建邮箱失败，请稍后重试")
-		}
+		s.failUpstream(c, req.AccountID, err)
 		return
 	}
 
@@ -743,7 +737,7 @@ func (s *Server) getInboxMessage(c *gin.Context) {
 			fail(c, http.StatusNotFound, "邮件不存在或已被删除")
 			return
 		}
-		failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "读取邮件失败，请稍后重试")
+		s.failUpstream(c, accountID, err)
 		return
 	}
 	s.inboxPreviews.SetFull(accountID, *message)
@@ -751,24 +745,12 @@ func (s *Server) getInboxMessage(c *gin.Context) {
 }
 
 func (s *Server) failInboxRead(c *gin.Context, accountID string, err error) {
-	msg := err.Error()
-	if isSessionError(msg) {
-		s.notifySessionExpired(accountID)
-		fail(c, http.StatusUnauthorized, "iCloud 会话失效，请更新 Cookie")
-		return
-	}
-	failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "读取邮件失败，请稍后重试")
+	s.failUpstream(c, accountID, err)
 }
 
 func auditCodeForUpstreamError(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return auditlog.ErrorCodeUpstreamTimeout
-	}
-	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "timeout") || strings.Contains(message, "deadline exceeded") {
-		return auditlog.ErrorCodeUpstreamTimeout
-	}
-	return auditlog.ErrorCodeUpstreamRejected
+	_, _, auditCode := classifyAPIError(err)
+	return auditCode
 }
 
 // ====================================================================
@@ -979,12 +961,7 @@ func (s *Server) runAliasAutomation(c *gin.Context) {
 		fail(c, http.StatusConflict, err.Error())
 		return
 	}
-	if isSessionError(err.Error()) {
-		s.notifySessionExpired(c.Param("id"))
-		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		return
-	}
-	fail(c, http.StatusBadGateway, "执行自动化规则失败: "+err.Error())
+	s.failUpstream(c, c.Param("id"), err)
 }
 
 func (s *Server) previewAliasAutomation(c *gin.Context) {
@@ -1001,12 +978,7 @@ func (s *Server) previewAliasAutomation(c *gin.Context) {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if isSessionError(err.Error()) {
-		s.notifySessionExpired(c.Param("id"))
-		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		return
-	}
-	fail(c, http.StatusBadGateway, "预览自动化规则失败: "+err.Error())
+	s.failUpstream(c, c.Param("id"), err)
 }
 
 type createAliasesBatchReq struct {
@@ -1065,12 +1037,7 @@ func (s *Server) createAliasesBatch(c *gin.Context) {
 		ok(c, batch)
 		return
 	}
-	if isSessionError(err.Error()) {
-		s.notifySessionExpired(c.Param("id"))
-		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		return
-	}
-	fail(c, http.StatusBadGateway, "批量创建邮箱失败: "+err.Error())
+	s.failUpstream(c, c.Param("id"), err)
 }
 
 type aliasCreationHistoryData struct {
@@ -1182,12 +1149,7 @@ func (s *Server) listAliases(c *gin.Context) {
 			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
 			return
 		}
-		if isSessionError(err.Error()) {
-			s.notifySessionExpired(accountID)
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		} else {
-			fail(c, http.StatusBadGateway, err.Error())
-		}
+		s.failUpstream(c, accountID, err)
 		return
 	}
 	history, historyErr := s.mgr.ListAliasCreationHistory(accountID, account.MaxAliasCreationHistory)
@@ -1228,7 +1190,7 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
 			return
 		}
-		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
+		s.failUpstream(c, req.AccountID, err)
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
@@ -1256,7 +1218,7 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
 			return
 		}
-		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
+		s.failUpstream(c, req.AccountID, err)
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
@@ -1281,19 +1243,19 @@ func (s *Server) deleteAlias(c *gin.Context) {
 			failAccountOperation(c, http.StatusInternalServerError, "保存刷新后的 Cookie 失败: ", err)
 			return
 		}
-		fail(c, http.StatusBadGateway, "删除失败: "+err.Error())
+		s.failUpstream(c, req.AccountID, err)
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 
-// isSessionError 判断错误是否由会话失效引起。
+// isSessionError 保留给旧的本地错误摘要调用方；HTTP 状态码本身不足以
+// 证明 Cookie 会话失效，业务路径应使用 isConfirmedSessionError。
 func isSessionError(msg string) bool {
 	m := strings.ToLower(msg)
-	return strings.Contains(m, "401") || strings.Contains(m, "403") ||
-		strings.Contains(m, "session") || strings.Contains(m, "cookie") ||
-		strings.Contains(m, "unauthorized") || strings.Contains(m, "认证") ||
-		strings.Contains(m, "会话校验失败")
+	return (strings.Contains(m, "session") &&
+		(strings.Contains(m, "expired") || strings.Contains(m, "invalid") || strings.Contains(m, "失效"))) ||
+		strings.Contains(m, "会话失效")
 }
 
 // reloadConfig 重新加载 accounts.json 配置文件。

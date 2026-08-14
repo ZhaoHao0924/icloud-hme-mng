@@ -54,28 +54,34 @@ const aliasCreationHistoryRequestLimit = 500;
 export type ApiErrorKind = "http" | "network" | "invalid_response" | "timeout";
 
 export class ApiError extends Error {
+  readonly action: string | null;
   readonly code: string | null;
   readonly kind: ApiErrorKind;
   readonly retryable: boolean;
   readonly status: number | null;
 
   constructor({
+    action,
     code,
     kind,
     message,
+    retryable,
     status,
   }: {
+    action?: string;
     code?: string;
     kind: ApiErrorKind;
     message: string;
+    retryable?: boolean;
     status?: number;
   }) {
     super(message);
     this.name = "ApiError";
+    this.action = action ?? null;
     this.code = code ?? null;
     this.kind = kind;
     this.status = status ?? null;
-    this.retryable = kind === "network";
+    this.retryable = retryable ?? (kind === "network" || kind === "timeout");
   }
 }
 
@@ -264,12 +270,7 @@ export function isPlatformAuthError(error: unknown) {
 }
 
 export function isSessionExpiredError(error: unknown) {
-  return (
-    isApiError(error) &&
-    !isApiTokenError(error) &&
-    !isPlatformAuthError(error) &&
-    (error.status === 401 || error.status === 403)
-  );
+  return isApiError(error) && error.code === "icloud_session_expired";
 }
 
 export function getApiErrorMessage(error: unknown) {
@@ -285,10 +286,41 @@ export function getApiErrorMessage(error: unknown) {
   if (isSessionExpiredError(error)) {
     return "会话已过期，请更新 Cookie。";
   }
-  if (error.status === 502) {
-    return `Apple 服务错误：${error.message}`;
+  switch (error.code) {
+    case "icloud_entitlement_required":
+      return "当前 Apple 账户未满足 Hide My Email 或 iCloud+ 使用资格，请确认账户权限后重试。";
+    case "alias_limit_reached":
+      return "Hide My Email 别名数量已达到上限，请清理不再使用的别名后重试。";
+    case "alias_daily_limit_reached":
+      return "今日别名创建额度已用尽，请明天再试或调整自动化额度。";
+    case "icloud_rate_limited":
+      return "Apple 暂时限制了请求频率，请稍后手动重试。";
+    case "icloud_device_trust_required":
+      return "Apple 要求完成设备信任或双重验证，请在 Apple 设备或官网登录后重试。";
+    case "request_validation_failed":
+      return "Apple 拒绝了请求参数，请检查输入后重试。";
+    case "request_state_conflict":
+      return "当前 Apple 资源状态与请求冲突，请刷新后再试。";
+    case "icloud_service_unavailable":
+      return "Apple 服务暂时不可用，请稍后重试。";
+    case "icloud_upstream_rejected":
+      return "Apple 拒绝了请求，暂时无法安全判断具体原因，请稍后重试。";
+    case "icloud_credentials_invalid":
+      return "Apple ID 或密码错误，请检查后重新登录。";
+    case "icloud_otp_invalid":
+      return "双重认证验证码无效，请重新发起登录并输入最新验证码。";
+    case "icloud_privacy_terms_required":
+      return "请先在 Apple 账户页面确认隐私条款，再重新登录。";
+    case "login_challenge_expired":
+      return "登录验证已过期，请重新提交 Apple ID 密码。";
   }
-  return error.message;
+  if (error.kind === "timeout") {
+    return "Apple 服务响应超时，请稍后重试。";
+  }
+  if (error.status !== null && error.status >= 500) {
+    return "Apple 服务暂时不可用，请稍后重试。";
+  }
+  return error.message || "请求失败，请稍后重试。";
 }
 
 export function shouldRetryApiRequest(failureCount: number, error: unknown) {
@@ -346,9 +378,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
       if (!response.ok || !envelope.data.success) {
         throw new ApiError({
+          action: envelope.data.action,
           code: envelope.data.code,
           kind: "http",
           message: envelope.data.message?.trim() || fallbackHttpMessage(response.status),
+          retryable: envelope.data.retryable,
           status: response.status,
         });
       }
@@ -415,9 +449,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
           });
         }
         throw new ApiError({
+          action: envelope.data.action,
           code: envelope.data.code,
           kind: "http",
           message: envelope.data.message?.trim() || fallbackHttpMessage(response.status),
+          retryable: envelope.data.retryable,
           status: response.status,
         });
       }

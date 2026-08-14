@@ -226,15 +226,14 @@ func failPasswordLogin(c *gin.Context, prefix string, err error) {
 		fail(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, account.ErrLoginEmailMissing):
 		fail(c, http.StatusBadRequest, err.Error())
-	case errors.Is(err, account.ErrLoginSessionInvalid):
-		fail(c, http.StatusGone, "登录 challenge 无效或已过期，请重新提交密码")
-	case errors.Is(err, hme.ErrLoginChallengeInvalid):
-		fail(c, http.StatusGone, "登录 challenge 无效或已过期，请重新提交密码")
-	case errors.Is(err, hme.ErrInvalidCredentials), errors.Is(err, hme.ErrInvalidOTP):
-		fail(c, http.StatusUnauthorized, prefix+err.Error())
-	case errors.Is(err, hme.ErrPrivacyTermsRequired):
-		fail(c, http.StatusForbidden, err.Error())
+	case errors.Is(err, account.ErrLoginSessionInvalid), errors.Is(err, hme.ErrLoginChallengeInvalid):
+		contract, status, auditCode := credentialErrorContract(err)
+		failWithContract(c, status, auditCode, contract)
+	case errors.Is(err, hme.ErrInvalidCredentials), errors.Is(err, hme.ErrInvalidOTP), errors.Is(err, hme.ErrPrivacyTermsRequired):
+		contract, status, auditCode := credentialErrorContract(err)
+		failWithContract(c, status, auditCode, contract)
 	default:
-		fail(c, http.StatusBadGateway, prefix+err.Error())
+		contract, status, auditCode := classifyAPIError(err)
+		failWithContract(c, status, auditCode, contract)
 	}
 }

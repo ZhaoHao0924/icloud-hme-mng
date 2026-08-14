@@ -1019,9 +1019,9 @@ func TestInboxListReusesAccountIMAPSession(t *testing.T) {
 	}
 }
 
-func TestIsSessionErrorRecognizesTrustChallenge(t *testing.T) {
-	if !isSessionError("iCloud session trust is no longer valid (HTTP 421)") {
-		t.Fatal("session trust challenge was not classified as a session error")
+func TestIsSessionErrorDoesNotRecognizeTrustChallenge(t *testing.T) {
+	if isSessionError("iCloud session trust is no longer valid (HTTP 421)") {
+		t.Fatal("session trust challenge was incorrectly classified as a Cookie session error")
 	}
 }
 

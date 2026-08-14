@@ -565,7 +565,10 @@ describe("API client", () => {
       Promise.resolve(
         jsonResponse(
           {
+            action: "update_cookie",
+            code: "icloud_session_expired",
             message: "iCloud 会话失效，请更新 Cookie",
+            retryable: false,
             success: false,
           },
           401,
@@ -618,13 +621,55 @@ describe("API client", () => {
 
   it("retains the cleaned backend summary for Apple service errors", () => {
     const error = new ApiError({
+      code: "icloud_service_unavailable",
       kind: "http",
       message: "读取邮件失败: upstream unavailable",
+      retryable: true,
       status: 502,
     });
 
-    expect(getApiErrorMessage(error)).toBe("Apple 服务错误：读取邮件失败: upstream unavailable");
-    expect(shouldRetryApiRequest(0, error)).toBe(false);
+    expect(getApiErrorMessage(error)).toBe("Apple 服务暂时不可用，请稍后重试。");
+    expect(shouldRetryApiRequest(0, error)).toBe(true);
+  });
+
+  it.each([
+    [
+      "icloud_entitlement_required",
+      "当前 Apple 账户未满足 Hide My Email 或 iCloud+ 使用资格，请确认账户权限后重试。",
+      false,
+    ],
+    [
+      "alias_limit_reached",
+      "Hide My Email 别名数量已达到上限，请清理不再使用的别名后重试。",
+      false,
+    ],
+    ["alias_daily_limit_reached", "今日别名创建额度已用尽，请明天再试或调整自动化额度。", false],
+    ["icloud_rate_limited", "Apple 暂时限制了请求频率，请稍后手动重试。", false],
+    [
+      "icloud_device_trust_required",
+      "Apple 要求完成设备信任或双重验证，请在 Apple 设备或官网登录后重试。",
+      false,
+    ],
+    ["request_state_conflict", "当前 Apple 资源状态与请求冲突，请刷新后再试。", false],
+    ["icloud_service_unavailable", "Apple 服务暂时不可用，请稍后重试。", true],
+    ["icloud_upstream_rejected", "Apple 拒绝了请求，暂时无法安全判断具体原因，请稍后重试。", false],
+  ] as const)("maps %s to a redacted message and retry boundary", (code, message, retryable) => {
+    const error = new ApiError({
+      code,
+      kind: "http",
+      message: "raw upstream body with cookie=must-not-render",
+      retryable,
+      status: 403,
+    });
+    expect(getApiErrorMessage(error)).toBe(message);
+    expect(getApiErrorMessage(error)).not.toContain("must-not-render");
+    expect(shouldRetryApiRequest(0, error)).toBe(retryable);
+  });
+
+  it("does not treat a bare forbidden response as Cookie expiry", () => {
+    const error = new ApiError({ kind: "http", message: "forbidden", status: 403 });
+    expect(isSessionExpiredError(error)).toBe(false);
+    expect(getApiErrorMessage(error)).not.toContain("Cookie");
   });
 
   it("rejects malformed successful responses as a contract error", async () => {
@@ -739,8 +784,6 @@ describe("API client", () => {
       kind: "timeout",
       message: "读取邮件超时，请稍后重试。",
     } satisfies Partial<ApiError>);
-    expect(shouldRetryApiRequest(0, new ApiError({ kind: "timeout", message: "超时" }))).toBe(
-      false,
-    );
+    expect(shouldRetryApiRequest(0, new ApiError({ kind: "timeout", message: "超时" }))).toBe(true);
   });
 });

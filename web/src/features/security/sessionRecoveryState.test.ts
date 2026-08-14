@@ -30,20 +30,21 @@ describe("session recovery location state", () => {
 });
 
 describe("stored session errors", () => {
-  it.each([
-    "Cookie 会话已过期，请更新凭据",
-    "iCloud 会话失效,请更新 Cookie",
-    "Cookie 校验失败: HTTP 401",
-    "cookie request returned 403",
-    "Session expired",
-  ])("recognizes %s", (message) => {
-    expect(isStoredSessionExpiredError(message)).toBe(true);
-  });
-
-  it.each(["", "Cookie 格式无效", "IMAP 连接超时", "Apple 服务返回 502"])(
-    "does not misclassify %s",
+  it.each(["Cookie 会话已过期，请更新凭据", "iCloud 会话失效,请更新 Cookie", "Session expired"])(
+    "recognizes %s",
     (message) => {
-      expect(isStoredSessionExpiredError(message)).toBe(false);
+      expect(isStoredSessionExpiredError(message)).toBe(true);
     },
   );
+
+  it.each([
+    "",
+    "Cookie 格式无效",
+    "Cookie 校验失败: HTTP 401",
+    "cookie request returned 403",
+    "IMAP 连接超时",
+    "Apple 服务返回 502",
+  ])("does not misclassify %s", (message) => {
+    expect(isStoredSessionExpiredError(message)).toBe(false);
+  });
 });

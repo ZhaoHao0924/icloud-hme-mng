@@ -12,6 +12,39 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
+失败响应会在 `success: false` 时携带脱敏的业务错误契约：
+
+```json
+{
+  "success": false,
+  "code": "icloud_service_unavailable",
+  "message": "Apple 服务暂时不可用，请稍后重试。",
+  "retryable": true,
+  "action": "retry_later"
+}
+```
+
+`code`、`retryable` 和 `action` 是跨页面稳定字段。客户端不得根据单独的 HTTP
+`401`/`403` 推断 Cookie 失效，也不得展示 Apple 原始响应体、Cookie、Token 或未验证的归因。
+
+### ERR-001 错误矩阵
+
+| `code`                         | 含义                              | 建议动作                | 自动重试 |
+| ------------------------------ | --------------------------------- | ----------------------- | -------- |
+| `icloud_session_expired`       | 已确认的 iCloud Cookie 会话失效   | `update_cookie`         | 否       |
+| `icloud_entitlement_required`  | Hide My Email 或 iCloud+ 资格不足 | `check_icloud_plus`     | 否       |
+| `alias_limit_reached`          | 别名总量或服务容量达到上限        | `review_alias_limits`   | 否       |
+| `alias_daily_limit_reached`    | 当日别名创建额度已用尽            | `wait_for_daily_limit`  | 否       |
+| `icloud_rate_limited`          | 频率或风控限制                    | `wait_before_retry`     | 否       |
+| `icloud_device_trust_required` | 设备信任或二次验证要求            | `complete_device_trust` | 否       |
+| `request_validation_failed`    | 上游参数校验失败                  | `fix_request`           | 否       |
+| `request_state_conflict`       | 上游资源状态冲突                  | `refresh_state`         | 否       |
+| `icloud_service_unavailable`   | Apple 暂时不可用或超时            | `retry_later`           | 是       |
+| `icloud_upstream_rejected`     | 无法安全定性的上游拒绝            | `retry_later`           | 否       |
+
+密码登录还会使用 `icloud_credentials_invalid`、`icloud_otp_invalid`、
+`icloud_privacy_terms_required` 和 `login_challenge_expired`，这些错误均不会进入 Cookie 恢复流程。
+
 ### 访问控制
 
 服务默认只监听 `127.0.0.1:8081`。使用 `0.0.0.0`、`:8081` 或其他非回环地址时，必须设置至少 32 个字符的环境变量 `ICLOUD_HME_API_TOKEN`，否则服务会拒绝启动。
@@ -69,7 +102,7 @@ POST /api/auth/logout
 **错误响应:**
 
 - `400 Bad Request` — 参数错误
-- `401 Unauthorized` — `code: "api_token_invalid"` 表示 API Token 错误；`platform_auth_setup_required` 和 `platform_auth_required` 表示需要完成平台初始化或登录；其他无上述 code 的 401/403 可表示 iCloud 会话失效
+- `401 Unauthorized` — `code: "api_token_invalid"` 表示 API Token 错误；`platform_auth_setup_required` 和 `platform_auth_required` 表示需要完成平台初始化或登录；iCloud 会话只有在 `code: "icloud_session_expired"` 时才表示已确认失效
 - `413 Payload Too Large` — 请求体超过 1 MiB
 - `404 Not Found` — 账号不存在
 - `500 Internal Server Error` — 本地账户配置读取或持久化失败
@@ -196,8 +229,9 @@ Content-Type: application/json
 
 **错误情况:**
 
-- `401` — Cookie 过期，需更新
-- `502` — iCloud 服务错误，会自动重试 5 次
+- `401` — 仅当 `code: "icloud_session_expired"` 时表示 Cookie 已确认失效
+- `403` — 可能是资格、设备信任或无法定性的上游拒绝，必须按 `code` 处理，不得直接引导更新 Cookie
+- `502`/`503`/`504` — 按 `code: "icloud_service_unavailable"` 判断是否允许一次安全重试
 
 ---
 
@@ -1004,6 +1038,7 @@ for alias in resp.json()["data"]["aliases"]:
 - **创建频率**: iCloud 限制别名创建频率，过快会返回 429
 - **Cookie 有效期**: 约 24 小时，需定期更新
 - **邮件读取**: 依赖 IMAP 连接，超时默认 30 秒
+
 ---
 
 ## 163 发件 / QQ 收件通知

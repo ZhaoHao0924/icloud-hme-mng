@@ -58,7 +58,7 @@ describe("AccountWorkspace", () => {
     mockScenario.set("error");
     renderWorkspace();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务错误");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     const retryButton = screen.getByRole("button", { name: "重新加载" });
 
     mockScenario.set("success");
@@ -157,7 +157,7 @@ describe("AccountWorkspace", () => {
     await user.type(proxyInput, proxyURL);
     await user.click(within(dialog).getByRole("button", { name: "添加账户" }));
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Apple 服务错误");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(nameInput).toHaveValue("保留输入的账号");
     expect(emailInput).toHaveValue("retry@icloud.com");
     expect(proxyInput).toHaveValue(proxyURL);
@@ -219,7 +219,7 @@ describe("AccountWorkspace", () => {
     mockScenario.set("error");
     await user.click(within(dialog).getByRole("button", { name: "删除账户" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务错误");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(screen.getByRole("alertdialog", { name: "确认删除账户？" })).toBeInTheDocument();
     expect(screen.getByText("主账号")).toBeInTheDocument();
     expect(screen.getByText("2 个账户")).toBeInTheDocument();

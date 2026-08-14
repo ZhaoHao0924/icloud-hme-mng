@@ -90,7 +90,7 @@ describe("SecurityPage Cookie form", () => {
     await user.type(input, "session=retry-value");
     await user.click(within(section).getByRole("button", { name: "更新 Cookie" }));
 
-    expect(await within(section).findByRole("alert")).toHaveTextContent("Apple 服务错误");
+    expect(await within(section).findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(input).toHaveValue("");
     expect(within(section).getByText("未配置")).toBeInTheDocument();
     const mutation = queryClient.getMutationCache().getAll().at(-1);
@@ -163,7 +163,7 @@ describe("SecurityPage App Password form", () => {
     await user.type(passwordInput, "qrst-uvwx-yzab-cdef");
     await user.click(within(section).getByRole("button", { name: "验证并保存" }));
 
-    expect(await within(section).findByRole("alert")).toHaveTextContent("Apple 服务错误");
+    expect(await within(section).findByRole("alert")).toHaveTextContent("Apple 服务暂时不可用");
     expect(emailInput).toHaveValue("pending@icloud.com.cn");
     expect(passwordInput).toHaveValue("");
     expect(within(section).getByText("未配置")).toBeInTheDocument();

@@ -122,7 +122,7 @@ describe("SettingsPage", () => {
     );
     renderSettings();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("logs unavailable");
+    expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用");
     expect(screen.getByRole("button", { name: "刷新日志" })).toBeEnabled();
   });
 
@@ -179,7 +179,7 @@ describe("SettingsPage", () => {
     await screen.findByText("icloud-hme");
     await user.click(screen.getByRole("button", { name: "重载配置" }));
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("reload unavailable"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("服务暂时不可用"));
     expect(screen.getByRole("button", { name: "重载配置" })).toBeEnabled();
   });
 });

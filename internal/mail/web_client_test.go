@@ -247,6 +247,33 @@ func TestFetchWebThreadRecipientsUsesThreadDetail(t *testing.T) {
 	}
 }
 
+func TestFetchWebThreadRecipientsDoesNotExposeSuccessfulFailureBody(t *testing.T) {
+	const secret = "thread-detail-token-must-not-leak"
+	fakeHTTP := &fakeWebHTTPClient{responses: []*http.Response{
+		webJSONResponse(200, map[string]any{
+			"webservices": map[string]any{
+				"mccgateway": map[string]any{"url": "https://p321-mccgateway.icloud.com:443"},
+			},
+		}),
+		webJSONResponse(200, map[string]any{
+			"error": map[string]any{
+				"code":         "UNKNOWN_THREAD_FAILURE",
+				"errorMessage": secret,
+			},
+			"success": false,
+		}),
+	}}
+	client := newWebClient(map[string]string{"session": "secret"}, "12345", "icloud.com", fakeHTTP)
+
+	_, err := client.fetchWebThreadRecipients("thread-id")
+	if err == nil {
+		t.Fatal("fetchWebThreadRecipients() error = nil, want classified failure")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("fetchWebThreadRecipients() leaked upstream response: %v", err)
+	}
+}
+
 func TestFindByAliasUsesExactRecipientOnly(t *testing.T) {
 	fake := newFakeWebMailClient(map[string]any{
 		"success": true,

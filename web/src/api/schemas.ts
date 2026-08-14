@@ -379,10 +379,12 @@ export const deletedAccountSchema = z
 
 export const apiEnvelopeSchema = z
   .object({
+    action: z.string().optional(),
     success: z.boolean(),
     code: z.string().optional(),
     data: z.unknown().optional(),
     message: z.string().optional(),
+    retryable: z.boolean().optional(),
   })
   .strip();
 

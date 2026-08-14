@@ -5,7 +5,7 @@ import { Eye, EyeOff, LoaderCircle, LogIn, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
-import { api, getApiErrorMessage, isApiError } from "../../api/client";
+import { api, getApiErrorMessage } from "../../api/client";
 import { queryKeys } from "../../api/queries";
 import type { Account } from "../../api/schemas";
 import { useNotifications } from "../../components/notificationContext";
@@ -41,9 +41,6 @@ async function invalidateSessionCredentialQueries(queryClient: QueryClient, acco
 }
 
 function getAppleLoginErrorMessage(error: unknown) {
-  if (isApiError(error) && (error.status === 401 || error.status === 403)) {
-    return error.message;
-  }
   return getApiErrorMessage(error);
 }
 

@@ -42,5 +42,5 @@ export function isStoredSessionExpiredError(message: string) {
   ) {
     return true;
   }
-  return normalized.includes("cookie") && /(^|\D)(401|403)(\D|$)/.test(normalized);
+  return false;
 }

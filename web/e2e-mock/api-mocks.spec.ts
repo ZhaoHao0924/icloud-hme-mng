@@ -576,7 +576,7 @@ test("inbox keeps its filters visible for Apple fallback errors and gateway time
   await waitForMockWorker(page, "收件箱");
 
   const fallbackAlert = page.getByRole("alert");
-  await expect(fallbackAlert).toContainText("Apple 服务错误");
+  await expect(fallbackAlert).toContainText("Apple 服务暂时不可用");
   await expect(page.getByLabel("别名")).toHaveValue("quiet-orchid@icloud.com");
   await expect(page.getByLabel("时间范围")).toHaveValue("3");
   await expect(page.getByLabel("数量")).toHaveValue("50");
@@ -586,8 +586,7 @@ test("inbox keeps its filters visible for Apple fallback errors and gateway time
   await page.goto("/accounts/acc_primary/inbox?mock=inbox-timeout");
   await waitForMockWorker(page, "收件箱");
   const timeoutAlert = page.getByRole("alert");
-  await expect(timeoutAlert).toContainText("读取邮件超时");
-  await expect(timeoutAlert).toContainText("读取邮件超时，请稍后重试。");
+  await expect(timeoutAlert).toContainText("Apple 服务暂时不可用");
   await expect(page.getByRole("button", { name: "重新加载" })).toBeVisible();
 });
 
@@ -684,18 +683,41 @@ test("alias session expiration recovers through credentials and returns to the a
   expect(page.url()).not.toContain("browser-alias-recovery-value");
 });
 
-test("forbidden alias sessions expose the same credential recovery entry", async ({ page }) => {
+test("generic alias create 403 does not trigger Cookie recovery", async ({ page }) => {
   await page.goto("/accounts/acc_primary/aliases?mock=alias-forbidden");
   await waitForMockWorker(page, "别名");
 
-  const alert = page.getByRole("alert");
-  await expect(alert).toContainText("Cookie 会话已过期");
-  await expect(alert).toContainText("会话已过期，请更新 Cookie。");
-  const recoveryLink = alert.getByRole("link", { name: "更新 Cookie" });
-  await expect(recoveryLink).toHaveAttribute("href", "/accounts/acc_primary/security");
-  await recoveryLink.click();
-  await expect(page).toHaveURL(/\/accounts\/acc_primary\/security$/);
-  await expect(page.getByLabel("Cookie 数据")).toBeFocused();
+  await expect(page.getByRole("table", { name: "别名列表" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "更新 Cookie" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "创建别名" }).click();
+  const dialog = page.getByRole("dialog", { name: "创建别名" });
+  await dialog.getByRole("button", { name: "创建别名", exact: true }).click();
+
+  const alert = dialog.getByRole("alert");
+  await expect(alert).toContainText("Apple 拒绝了请求");
+  await expect(alert).not.toContainText("会话已过期");
+  await expect(alert.getByRole("link", { name: "更新 Cookie" })).toHaveCount(0);
+  await expect(page.locator("table.alias-table")).toBeVisible();
+});
+
+test("alias business error matrix keeps code-specific recovery boundaries", async ({ page }) => {
+  const cases = [
+    ["alias-entitlement", "iCloud+ 使用资格"],
+    ["alias-limit", "别名数量已达到上限"],
+    ["alias-rate-limit", "限制了请求频率"],
+    ["alias-state-conflict", "资源状态与请求冲突"],
+    ["alias-trust", "设备信任或双重验证"],
+  ] as const;
+
+  for (const [scenario, message] of cases) {
+    await page.goto(`/accounts/acc_primary/aliases?mock=${scenario}`);
+    await waitForMockWorker(page, "别名");
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText(message);
+    await expect(alert.getByRole("link", { name: "更新 Cookie" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "重新加载" })).toBeVisible();
+  }
 });
 
 test("alias Apple service errors keep retryable context and recover once the service returns success", async ({
@@ -705,8 +727,7 @@ test("alias Apple service errors keep retryable context and recover once the ser
   await waitForMockWorker(page, "别名");
 
   const alert = page.getByRole("alert");
-  await expect(alert).toContainText("Apple 服务错误");
-  await expect(alert).toContainText("模拟 Apple 服务错误");
+  await expect(alert).toContainText("Apple 服务暂时不可用");
   await expect(page.getByRole("link", { name: "更新 Cookie" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "创建别名" })).toHaveCount(0);
   await expect(page.getByRole("table", { name: "别名列表" })).toHaveCount(0);
@@ -728,7 +749,7 @@ test("alias Apple service errors keep retryable context and recover once the ser
   }
 
   await page.getByRole("button", { name: "重新加载" }).click();
-  await expect(alert).toContainText("Apple 服务错误");
+  await expect(alert).toContainText("Apple 服务暂时不可用");
 
   await page.goto("/accounts/acc_primary/aliases?mock=success");
   await waitForMockWorker(page, "别名");
@@ -1239,8 +1260,8 @@ test("browser worker serves error fixtures", async ({ page }) => {
   });
 
   expect(response.status).toBe(502);
-  expect(response.body).toMatchObject({ message: "模拟 Apple 服务错误", success: false });
-  await expect(page.getByRole("alert")).toContainText("Apple 服务错误");
+  expect(response.body).toMatchObject({ code: "icloud_service_unavailable", success: false });
+  await expect(page.getByRole("alert")).toContainText("Apple 服务暂时不可用");
   await expect(page.getByRole("button", { name: "重新加载" })).toBeVisible();
 });
 
@@ -1300,10 +1321,12 @@ test("settings keeps health and reload errors recoverable", async ({ page }) => 
   );
   await expect(page.getByRole("button", { name: "重新检查" })).toBeVisible();
   await expect(page.getByRole("region", { name: "操作日志" }).getByRole("alert")).toContainText(
-    "Apple 服务错误",
+    "Apple 服务暂时不可用",
   );
   await page.getByRole("button", { name: "重载配置" }).click();
-  await expect(page.getByLabel("配置重载").getByRole("alert")).toContainText("Apple 服务错误");
+  await expect(page.getByLabel("配置重载").getByRole("alert")).toContainText(
+    "Apple 服务暂时不可用",
+  );
   await expect(page.getByRole("button", { name: "重载配置" })).toBeEnabled();
 });
 
@@ -1384,7 +1407,7 @@ test("account creation keeps entered values on server error", async ({ page }) =
   await dialog.getByLabel("iCloud 邮箱").fill("keep@icloud.com");
   await dialog.getByRole("button", { name: "添加账户", exact: true }).click();
 
-  await expect(dialog.getByRole("alert")).toContainText("Apple 服务错误");
+  await expect(dialog.getByRole("alert")).toContainText("Apple 服务暂时不可用");
   await expect(dialog.getByLabel("账户名称")).toHaveValue("错误后保留");
   await expect(dialog.getByLabel("iCloud 邮箱")).toHaveValue("keep@icloud.com");
 });

@@ -20,6 +20,7 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	"icloud-hme/internal/srp"
+	"icloud-hme/internal/upstream"
 )
 
 // AuthEndpoints iCloud 认证 API 端点
@@ -233,12 +234,12 @@ func (c *Client) authStart(state *authState) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 
 	state.authAttr = resp.Header.Get("X-Apple-Auth-Attributes")
@@ -264,12 +265,12 @@ func (c *Client) authFederate(state *authState) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 	return nil
 }
@@ -306,11 +307,11 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return nil, upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 
 	var result authInitResp
@@ -349,7 +350,7 @@ func (c *Client) authComplete(state *authState, serverChallenge, m1, m2 string) 
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return false, err
+		return false, upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 	updateAuthStateHeaders(state, resp)
@@ -367,7 +368,7 @@ func (c *Client) authComplete(state *authState, serverChallenge, m1, m2 string) 
 	case 412:
 		return false, ErrPrivacyTermsRequired
 	default:
-		return false, fmt.Errorf("auth complete 失败: HTTP %d", resp.StatusCode)
+		return false, upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 }
 
@@ -393,12 +394,12 @@ func (c *Client) prepareTwoFactor(state *authState) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 	updateAuthStateHeaders(state, resp)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("获取 2FA 选项失败: HTTP %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 	return nil
 }
@@ -422,7 +423,7 @@ func (c *Client) submitTwoFactor(state *authState, otp string) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 	updateAuthStateHeaders(state, resp)
@@ -431,7 +432,7 @@ func (c *Client) submitTwoFactor(state *authState, otp string) error {
 		if resp.StatusCode == 400 || resp.StatusCode == 401 || resp.StatusCode == 403 {
 			return ErrInvalidOTP
 		}
-		return fmt.Errorf("2FA 验证失败: HTTP %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 	return nil
 }
@@ -447,12 +448,12 @@ func (c *Client) getTrust(state *authState) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("trust 失败: HTTP %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 
 	state.authToken = resp.Header.Get("X-Apple-Session-Token")
@@ -497,12 +498,12 @@ func (c *Client) authenticateWeb(state *authState) error {
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return upstream.TransportError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("auth web 失败: HTTP %d", resp.StatusCode)
+		return upstream.ClassifyResponse(resp.StatusCode, nil)
 	}
 
 	var result struct {

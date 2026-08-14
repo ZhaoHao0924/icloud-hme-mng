@@ -145,7 +145,7 @@ func (s *aliasOperationService) withClient(accountID string, operation func(alia
 	if err := s.mgr.SaveCookies(accountID, client.SessionCookies()); err != nil {
 		return fmt.Errorf("保存刷新后的 Cookie 失败: %w", err)
 	}
-	if operationErr != nil && isSessionError(operationErr.Error()) {
+	if operationErr != nil && isConfirmedSessionError(operationErr) {
 		s.forgetClientLocked(accountID)
 	}
 	return operationErr
@@ -284,17 +284,15 @@ func (s *aliasOperationService) recordAliasCreation(
 }
 
 func aliasOperationErrorSummary(err error) string {
-	if err != nil && isSessionError(err.Error()) {
+	contract, _, _ := classifyAPIError(err)
+	if err != nil && contract.Code == apiErrorSessionExpired {
 		return "iCloud 会话失效，请更新 Cookie"
 	}
-	if err != nil {
-		message := strings.ToLower(err.Error())
-		if strings.Contains(message, "429") {
-			return "iCloud 请求频率受限，已延后重试"
-		}
-		if strings.Contains(message, "409") || strings.Contains(message, "507") {
-			return "iCloud 可能已达到别名上限，请检查账户"
-		}
+	if err != nil && contract.Code == apiErrorRateLimited {
+		return "iCloud 请求频率受限，请稍后重试"
 	}
-	return "创建别名失败，请稍后重试"
+	if err != nil && (contract.Code == apiErrorAliasLimit || contract.Code == apiErrorAliasDailyLimit) {
+		return contract.Message
+	}
+	return contract.Message
 }
