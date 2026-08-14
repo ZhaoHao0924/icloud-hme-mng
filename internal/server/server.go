@@ -9,6 +9,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/csv"
 	"errors"
@@ -163,7 +164,7 @@ func newServer(
 		s.apiTokenHash = sha256.Sum256([]byte(apiToken))
 	}
 	s.r = gin.New()
-	s.r.Use(gin.Recovery(), securityResponseHeaders, s.operationLogMiddleware)
+	s.r.Use(gin.Recovery(), securityResponseHeaders, requestIDMiddleware, s.operationLogMiddleware)
 	s.register()
 	s.aliasAutomation.Start()
 	return s, nil
@@ -370,7 +371,13 @@ func ok(c *gin.Context, data interface{}) {
 }
 
 func fail(c *gin.Context, code int, msg string) {
+	setOperationLogErrorCode(c, auditlog.ErrorCodeForStatus(code))
 	failWithCode(c, code, "", msg)
+}
+
+func failWithAuditCode(c *gin.Context, status int, auditCode, message string) {
+	setOperationLogErrorCode(c, auditCode)
+	failWithCode(c, status, "", message)
 }
 
 func requestBodyTooLargeMessage() string {
@@ -540,9 +547,9 @@ func (s *Server) createAlias(c *gin.Context) {
 		msg := err.Error()
 		if isSessionError(msg) {
 			s.notifySessionExpired(req.AccountID)
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
+			fail(c, http.StatusUnauthorized, "iCloud 会话失效，请更新 Cookie")
 		} else {
-			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
+			failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "创建邮箱失败，请稍后重试")
 		}
 		return
 	}
@@ -733,10 +740,10 @@ func (s *Server) getInboxMessage(c *gin.Context) {
 			return
 		}
 		if strings.Contains(err.Error(), "邮件不存在") {
-			fail(c, http.StatusNotFound, err.Error())
+			fail(c, http.StatusNotFound, "邮件不存在或已被删除")
 			return
 		}
-		fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+		failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "读取邮件失败，请稍后重试")
 		return
 	}
 	s.inboxPreviews.SetFull(accountID, *message)
@@ -747,10 +754,21 @@ func (s *Server) failInboxRead(c *gin.Context, accountID string, err error) {
 	msg := err.Error()
 	if isSessionError(msg) {
 		s.notifySessionExpired(accountID)
-		fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
+		fail(c, http.StatusUnauthorized, "iCloud 会话失效，请更新 Cookie")
 		return
 	}
-	fail(c, http.StatusBadGateway, "读取邮件失败: "+msg)
+	failWithAuditCode(c, http.StatusBadGateway, auditCodeForUpstreamError(err), "读取邮件失败，请稍后重试")
+}
+
+func auditCodeForUpstreamError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return auditlog.ErrorCodeUpstreamTimeout
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "timeout") || strings.Contains(message, "deadline exceeded") {
+		return auditlog.ErrorCodeUpstreamTimeout
+	}
+	return auditlog.ErrorCodeUpstreamRejected
 }
 
 // ====================================================================

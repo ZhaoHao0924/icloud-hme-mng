@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,8 @@ import (
 const (
 	defaultOperationLogLimit = 200
 	maxOperationLogLimit     = 500
+	auditRequestIDContextKey = "audit-request-id"
+	auditErrorCodeContextKey = "audit-error-code"
 )
 
 type operationLogData struct {
@@ -55,11 +58,63 @@ func (s *Server) operationLogMiddleware(c *gin.Context) {
 		return
 	}
 	_, _ = s.operationLogs.Record(auditlog.RecordInput{
-		Duration:  time.Since(startedAt),
-		Level:     operationLogLevel(c.Writer.Status()),
-		Operation: operation,
-		Status:    c.Writer.Status(),
+		RequestID:     operationLogRequestID(c),
+		Duration:      time.Since(startedAt),
+		Level:         operationLogLevel(c.Writer.Status()),
+		Operation:     operation,
+		OperationType: operationLogType(c.Request.Method, c.FullPath()),
+		Status:        c.Writer.Status(),
+		ErrorCode:     operationLogErrorCode(c, c.Writer.Status()),
+		Request:       operationLogRequestSnapshot(c),
 	})
+}
+
+func requestIDMiddleware(c *gin.Context) {
+	requestID := auditlog.NewRequestID()
+	c.Set(auditRequestIDContextKey, requestID)
+	c.Header("X-Request-ID", requestID)
+	c.Next()
+}
+
+func operationLogRequestID(c *gin.Context) string {
+	if value, found := c.Get(auditRequestIDContextKey); found {
+		if requestID, ok := value.(string); ok {
+			return requestID
+		}
+	}
+	return auditlog.NewRequestID()
+}
+
+func setOperationLogErrorCode(c *gin.Context, errorCode string) {
+	if auditlog.IsBusinessErrorCode(errorCode) {
+		c.Set(auditErrorCodeContextKey, errorCode)
+	}
+}
+
+func operationLogErrorCode(c *gin.Context, status int) string {
+	if value, found := c.Get(auditErrorCodeContextKey); found {
+		if errorCode, ok := value.(string); ok && auditlog.IsBusinessErrorCode(errorCode) {
+			return errorCode
+		}
+	}
+	return auditlog.ErrorCodeForStatus(status)
+}
+
+func operationLogRequestSnapshot(c *gin.Context) auditlog.RequestSnapshot {
+	query := c.Request.URL.Query()
+	return auditlog.RequestSnapshot{
+		Source:              auditlog.RequestSourceAPI,
+		BodyPresent:         c.Request.Body != nil && c.Request.ContentLength != 0,
+		AliasFilterApplied:  strings.TrimSpace(query.Get("alias")) != "",
+		PaginationRequested: query.Has("limit") || query.Has("days") || query.Has("before_uid"),
+	}
+}
+
+func operationLogType(_ string, route string) string {
+	route = strings.TrimPrefix(strings.Trim(route, "/"), "api/")
+	operationType := route
+	operationType = strings.NewReplacer("/", "_", ":", "", ".", "_", "-", "_").Replace(operationType)
+	return strings.Trim(operationType, "_")
 }
 
 func (s *Server) recordScheduledAliasAutomationRun(run aliasAutomationScheduledRun) {
@@ -68,11 +123,32 @@ func (s *Server) recordScheduledAliasAutomationRun(run aliasAutomationScheduledR
 	}
 	status, level := scheduledAliasAutomationLogStatus(run)
 	_, _ = s.operationLogs.Record(auditlog.RecordInput{
+		RequestID: auditlog.NewRequestID(),
 		Duration:  run.Duration,
 		Level:     level,
+		OperationType: "scheduled_alias_automation",
 		Operation: "定时执行别名自动化",
 		Status:    status,
+		ErrorCode: scheduledAliasAutomationLogErrorCode(run, status),
+		Request: auditlog.RequestSnapshot{
+			Source: auditlog.RequestSourceScheduler,
+		},
+		Response: auditlog.ResponseSnapshot{
+			CreatedCount: run.Created,
+			FailedCount:  run.Failed,
+		},
 	})
+}
+
+func scheduledAliasAutomationLogErrorCode(run aliasAutomationScheduledRun, status int) string {
+	switch {
+	case run.Status == "error":
+		return auditlog.ErrorCodeUpstreamRejected
+	case run.Status == "partial":
+		return auditlog.ErrorCodePartialResult
+	default:
+		return auditlog.ErrorCodeForStatus(status)
+	}
 }
 
 func scheduledAliasAutomationLogStatus(run aliasAutomationScheduledRun) (int, auditlog.Level) {
@@ -103,6 +179,22 @@ func operationLogLevel(status int) auditlog.Level {
 
 func operationLogOperation(method, route string) (string, bool) {
 	switch {
+	case method == http.MethodGet && route == "/api/auth/session":
+		return "查看平台登录状态", true
+	case method == http.MethodGet && route == "/api/accounts":
+		return "查看账户列表", true
+	case method == http.MethodGet && route == "/api/accounts/:id/alias-automation":
+		return "查看别名自动化规则", true
+	case method == http.MethodPost && route == "/api/accounts/:id/alias-automation/preview":
+		return "预览别名自动化规则", true
+	case method == http.MethodGet && route == "/api/aliases":
+		return "查看别名列表", true
+	case method == http.MethodGet && route == "/api/health":
+		return "查看服务健康状态", true
+	case method == http.MethodGet && route == "/api/notifications/email":
+		return "查看 163 邮件通知设置", true
+	case method == http.MethodGet && route == "/api/notifications/webhook":
+		return "查看 Webhook 通知设置", true
 	case method == http.MethodPost && route == "/api/auth/setup":
 		return "初始化平台管理员", true
 	case method == http.MethodPost && route == "/api/auth/login":

@@ -3,6 +3,9 @@ package auditlog
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +14,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
+	// SchemaVersion identifies the current on-disk audit entry shape.
+	SchemaVersion = 2
+
 	// RetentionDays is the fixed on-disk retention window for operation logs.
 	RetentionDays = 7
 
@@ -23,7 +30,69 @@ const (
 	fileExtension   = ".jsonl"
 )
 
+const (
+	RequestSourceAPI       = "api"
+	RequestSourceScheduler = "scheduler"
+	RequestSourceLegacy    = "legacy"
+
+	OperationTypeLegacy      = "legacy"
+	OperationTypeUnspecified = "unspecified"
+
+	ErrorCodeValidationFailed    = "validation_failed"
+	ErrorCodeUnauthorized         = "unauthorized"
+	ErrorCodeForbidden            = "forbidden"
+	ErrorCodeNotFound             = "not_found"
+	ErrorCodeConflict             = "conflict"
+	ErrorCodeRequestTooLarge      = "request_too_large"
+	ErrorCodeRequestTimeout       = "request_timeout"
+	ErrorCodeRateLimited          = "rate_limited"
+	ErrorCodeUpstreamRejected     = "upstream_rejected"
+	ErrorCodeUpstreamTimeout      = "upstream_timeout"
+	ErrorCodeServiceUnavailable   = "service_unavailable"
+	ErrorCodeInternalFailure      = "internal_failure"
+	ErrorCodePartialResult        = "partial_result"
+)
+
 var retention = time.Duration(RetentionDays) * 24 * time.Hour
+
+var fallbackRequestIDCounter uint64
+
+var allowedOperationTypes = map[string]struct{}{
+	"auth_session":                           {},
+	"auth_setup":                             {},
+	"auth_login":                             {},
+	"auth_logout":                            {},
+	"accounts":                               {},
+	"accounts_id":                            {},
+	"accounts_id_password":                   {},
+	"accounts_id_cookies":                    {},
+	"accounts_id_login_start":                {},
+	"accounts_id_login_verify":               {},
+	"accounts_id_alias_automation":           {},
+	"accounts_id_alias_automation_pause":     {},
+	"accounts_id_alias_automation_resume":    {},
+	"accounts_id_alias_automation_preview":   {},
+	"accounts_id_alias_automation_run":       {},
+	"accounts_id_alias_creation_history":     {},
+	"accounts_id_alias_creation_history_csv": {},
+	"accounts_id_aliases_batch":               {},
+	"create":                                 {},
+	"inbox":                                  {},
+	"inbox_messages_id":                      {},
+	"aliases":                                {},
+	"aliases_id":                             {},
+	"aliases_id_deactivate":                  {},
+	"aliases_id_reactivate":                  {},
+	"reload":                                 {},
+	"health":                                 {},
+	"notifications_email":                    {},
+	"notifications_email_test":               {},
+	"notifications_webhook":                  {},
+	"notifications_webhook_test":             {},
+	"scheduled_alias_automation":             {},
+	OperationTypeLegacy:                        {},
+	OperationTypeUnspecified:                   {},
+}
 
 // Level is the severity assigned to a completed operation.
 type Level string
@@ -34,22 +103,53 @@ const (
 	LevelError   Level = "error"
 )
 
+// RequestSnapshot is a fixed, allowlisted summary of an operation request.
+// It deliberately cannot contain identifiers, query values, headers, or body data.
+type RequestSnapshot struct {
+	Source              string `json:"source"`
+	BodyPresent         bool   `json:"body_present"`
+	AliasFilterApplied  bool   `json:"alias_filter_applied"`
+	PaginationRequested bool   `json:"pagination_requested"`
+}
+
+// ResponseSnapshot is a fixed, allowlisted summary of an operation response.
+// It deliberately cannot contain response data or upstream payloads.
+type ResponseSnapshot struct {
+	Success      bool `json:"success"`
+	CreatedCount int  `json:"created_count,omitempty"`
+	FailedCount  int  `json:"failed_count,omitempty"`
+}
+
 // Entry is a privacy-safe operation record. It intentionally has no request body,
 // query string, account identifier, email address, credential, or upstream response.
 type Entry struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Level      Level     `json:"level"`
-	Operation  string    `json:"operation"`
-	Status     int       `json:"status"`
-	DurationMS int64     `json:"duration_ms"`
+	SchemaVersion int              `json:"schema_version"`
+	Timestamp     time.Time        `json:"timestamp"`
+	RequestID     string           `json:"request_id"`
+	Level         Level            `json:"level"`
+	Operation     string           `json:"operation"`
+	OperationType string           `json:"operation_type"`
+	Status        int              `json:"status"`
+	ErrorCode     string           `json:"error_code,omitempty"`
+	DurationMS    int64            `json:"duration_ms"`
+	RetryCount    int              `json:"retry_count"`
+	Request       RequestSnapshot  `json:"request"`
+	Response      ResponseSnapshot `json:"response"`
 }
 
-// RecordInput is the narrow input accepted by Store.Record.
+// RecordInput is the narrow input accepted by Store.Record. Its snapshots only
+// expose fixed, non-sensitive booleans and counters.
 type RecordInput struct {
-	Level     Level
-	Operation string
-	Status    int
-	Duration  time.Duration
+	RequestID     string
+	Level         Level
+	Operation     string
+	OperationType string
+	Status        int
+	ErrorCode     string
+	Duration      time.Duration
+	RetryCount    int
+	Request       RequestSnapshot
+	Response      ResponseSnapshot
 }
 
 // Store persists operation logs as one JSON Lines file per UTC day.
@@ -127,11 +227,18 @@ func (s *Store) Record(input RecordInput) (Entry, error) {
 		durationMS = 0
 	}
 	entry := Entry{
-		Timestamp:  now,
-		Level:      normalizedLevel(input.Level),
-		Operation:  operation,
-		Status:     input.Status,
-		DurationMS: durationMS,
+		SchemaVersion: SchemaVersion,
+		Timestamp:     now,
+		RequestID:     normalizedRequestID(input.RequestID),
+		Level:         normalizedLevel(input.Level),
+		Operation:     operation,
+		OperationType: normalizedOperationType(input.OperationType),
+		Status:        input.Status,
+		ErrorCode:     normalizedErrorCode(input.ErrorCode),
+		DurationMS:    durationMS,
+		RetryCount:    normalizedRetryCount(input.RetryCount),
+		Request:       normalizedRequestSnapshot(input.Request, RequestSourceAPI),
+		Response:      normalizedResponseSnapshot(input.Response, input.Status),
 	}
 
 	s.mu.Lock()
@@ -285,6 +392,150 @@ func normalizedLevel(level Level) Level {
 	}
 }
 
+// NewRequestID returns a server-generated opaque request correlation ID. Audit
+// callers must not use client-provided header values, which might carry secrets.
+func NewRequestID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err == nil {
+		return hex.EncodeToString(raw[:])
+	}
+	fallback := sha256.Sum256([]byte(fmt.Sprintf(
+		"%d-%d",
+		time.Now().UTC().UnixNano(),
+		atomic.AddUint64(&fallbackRequestIDCounter, 1),
+	)))
+	return hex.EncodeToString(fallback[:16])
+}
+
+// ErrorCodeForStatus returns the allowlisted audit error code for a completed
+// HTTP operation. More specific upstream codes can be supplied to Record.
+func ErrorCodeForStatus(status int) string {
+	switch status {
+	case 0:
+		return ""
+	case 400, 422:
+		return ErrorCodeValidationFailed
+	case 401:
+		return ErrorCodeUnauthorized
+	case 403:
+		return ErrorCodeForbidden
+	case 404:
+		return ErrorCodeNotFound
+	case 408:
+		return ErrorCodeRequestTimeout
+	case 409:
+		return ErrorCodeConflict
+	case 413:
+		return ErrorCodeRequestTooLarge
+	case 429:
+		return ErrorCodeRateLimited
+	case 502:
+		return ErrorCodeUpstreamRejected
+	case 503:
+		return ErrorCodeServiceUnavailable
+	case 504:
+		return ErrorCodeUpstreamTimeout
+	default:
+		if status >= 500 {
+			return ErrorCodeInternalFailure
+		}
+		return ""
+	}
+}
+
+// IsBusinessErrorCode reports whether a code belongs to the fixed audit
+// allowlist. Arbitrary upstream errors must never be persisted as error codes.
+func IsBusinessErrorCode(code string) bool {
+	switch code {
+	case ErrorCodeValidationFailed,
+		ErrorCodeUnauthorized,
+		ErrorCodeForbidden,
+		ErrorCodeNotFound,
+		ErrorCodeConflict,
+		ErrorCodeRequestTooLarge,
+		ErrorCodeRequestTimeout,
+		ErrorCodeRateLimited,
+		ErrorCodeUpstreamRejected,
+		ErrorCodeUpstreamTimeout,
+		ErrorCodeServiceUnavailable,
+		ErrorCodeInternalFailure,
+		ErrorCodePartialResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedRequestID(value string) string {
+	if !isValidRequestID(value) {
+		return NewRequestID()
+	}
+	return strings.TrimSpace(value)
+}
+
+func sanitizedStoredRequestID(value string) string {
+	if !isValidRequestID(value) {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func isValidRequestID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 32 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'f') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizedOperationType(value string) string {
+	value = strings.TrimSpace(value)
+	if _, allowed := allowedOperationTypes[value]; !allowed {
+		return OperationTypeUnspecified
+	}
+	return value
+}
+
+func normalizedErrorCode(value string) string {
+	if IsBusinessErrorCode(value) {
+		return value
+	}
+	return ""
+}
+
+func normalizedRetryCount(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 99 {
+		return 99
+	}
+	return value
+}
+
+func normalizedRequestSnapshot(snapshot RequestSnapshot, defaultSource string) RequestSnapshot {
+	if snapshot.Source != RequestSourceAPI && snapshot.Source != RequestSourceScheduler && snapshot.Source != RequestSourceLegacy {
+		snapshot.Source = defaultSource
+	}
+	return snapshot
+}
+
+func normalizedResponseSnapshot(snapshot ResponseSnapshot, status int) ResponseSnapshot {
+	snapshot.Success = status >= 200 && status < 300
+	if snapshot.CreatedCount < 0 {
+		snapshot.CreatedCount = 0
+	}
+	if snapshot.FailedCount < 0 {
+		snapshot.FailedCount = 0
+	}
+	return snapshot
+}
+
 func startOfDay(timestamp time.Time) time.Time {
 	timestamp = timestamp.UTC()
 	return time.Date(timestamp.Year(), timestamp.Month(), timestamp.Day(), 0, 0, 0, 0, time.UTC)
@@ -339,6 +590,21 @@ func readEntries(path string) ([]Entry, error) {
 		if entry.DurationMS < 0 {
 			entry.DurationMS = 0
 		}
+		entry.RetryCount = normalizedRetryCount(entry.RetryCount)
+		entry.ErrorCode = normalizedErrorCode(entry.ErrorCode)
+		if entry.SchemaVersion <= 0 {
+			entry.SchemaVersion = 1
+		}
+		if entry.SchemaVersion < SchemaVersion {
+			entry.OperationType = OperationTypeLegacy
+			entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceLegacy)
+			entry.RequestID = ""
+		} else {
+			entry.OperationType = normalizedOperationType(entry.OperationType)
+			entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceAPI)
+			entry.RequestID = sanitizedStoredRequestID(entry.RequestID)
+		}
+		entry.Response = normalizedResponseSnapshot(entry.Response, entry.Status)
 		entries = append(entries, entry)
 	}
 	// A damaged line must not make the retained history unavailable.

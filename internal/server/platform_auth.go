@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"icloud-hme/internal/auditlog"
 	"icloud-hme/internal/platformauth"
 )
 
@@ -341,5 +342,8 @@ func (s *Server) abortAPIToken(c *gin.Context) {
 }
 
 func failWithCode(c *gin.Context, status int, code, message string) {
+	if _, found := c.Get(auditErrorCodeContextKey); !found {
+		setOperationLogErrorCode(c, auditlog.ErrorCodeForStatus(status))
+	}
 	c.JSON(status, apiResp{Success: false, Code: code, Message: message})
 }

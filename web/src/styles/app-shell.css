@@ -491,6 +491,18 @@
   white-space: nowrap;
 }
 
+.settings-log-code,
+.settings-log-request-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: inherit;
+}
+
+.settings-log-request-id {
+  max-inline-size: 16rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .settings-log-empty,
 .settings-log-error {
   padding: var(--space-4);

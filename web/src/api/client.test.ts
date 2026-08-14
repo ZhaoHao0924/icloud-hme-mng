@@ -111,7 +111,20 @@ describe("API client", () => {
                 duration_ms: 842,
                 level: "info",
                 operation: "读取收件箱",
+                operation_type: "inbox",
+                request: {
+                  account_id: "audit-private-account",
+                  alias: "audit-private-alias@example.test",
+                  alias_filter_applied: false,
+                  body_present: false,
+                  pagination_requested: true,
+                  source: "api",
+                },
                 request_body: "must-not-reach-ui-state",
+                request_id: "9b802520ea894105a6c3401168b7f7f1",
+                response: { raw_body: "must-not-reach-ui-state", success: true },
+                retry_count: 0,
+                schema_version: 2,
                 status: 200,
                 timestamp: "2026-08-02T08:30:00Z",
               },
@@ -135,8 +148,20 @@ describe("API client", () => {
       entries: [
         {
           duration_ms: 842,
+          error_code: "",
           level: "info",
           operation: "读取收件箱",
+          operation_type: "inbox",
+          request: {
+            alias_filter_applied: false,
+            body_present: false,
+            pagination_requested: true,
+            source: "api",
+          },
+          request_id: "9b802520ea894105a6c3401168b7f7f1",
+          response: { created_count: 0, failed_count: 0, success: true },
+          retry_count: 0,
+          schema_version: 2,
           status: 200,
           timestamp: "2026-08-02T08:30:00Z",
         },
@@ -144,6 +169,9 @@ describe("API client", () => {
       retention_days: 7,
     });
     expect(logs.entries[0]).not.toHaveProperty("request_body");
+    expect(logs.entries[0].request).not.toHaveProperty("account_id");
+    expect(logs.entries[0].request).not.toHaveProperty("alias");
+    expect(logs.entries[0].response).not.toHaveProperty("raw_body");
   });
 
   it("serializes mutation data in the JSON body and encodes dynamic path segments", async () => {

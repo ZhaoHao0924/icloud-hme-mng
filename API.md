@@ -834,7 +834,17 @@ GET /api/accounts/:id/alias-creation-history.csv
 GET /api/logs?limit=200
 ```
 
-返回最近的隐私安全操作日志，`limit` 范围为 `1..500`，默认 `200`。日志按时间倒序，保存最近 7 天；过期记录会在服务启动、写入和每小时清理时自动删除。每条记录只包含时间、级别、操作名称、HTTP 状态和耗时，不包含账户 ID、邮件地址、Cookie、App Password、请求参数、邮件正文或 Apple 原始响应。定时别名自动化在每次运行状态持久化后也会写入 `定时执行别名自动化` 记录。
+新写入的审计记录使用 `schema_version: 2`，并包含服务端生成的 `request_id`、稳定的
+`operation_type`、HTTP 状态、允许的 `error_code`、耗时和 `retry_count`。`request` 仅包含
+来源、是否有请求体、是否应用别名筛选和是否请求分页等固定布尔摘要；`response` 仅包含成功状态
+以及安全的创建/失败计数。客户端传入的 `X-Request-ID` 不会回显或持久化，服务端总是生成新的
+不透明关联 ID。旧版日志在读取时以 `schema_version: 1` 和 `operation_type: legacy` 兼容返回。
+
+审计字段按白名单持久化，不保存请求体、query 值、header、Cookie、Apple ID 密码、App Password、
+API Token、OTP、代理认证、完整别名地址、邮件正文或上游原始响应体。`error_code` 仅使用固定的
+脱敏业务代码，例如 `validation_failed`、`upstream_rejected` 和 `upstream_timeout`。
+
+返回最近的隐私安全操作日志，`limit` 范围为 `1..500`，默认 `200`。日志按时间倒序，保存最近 7 天；过期记录会在服务启动、写入和每小时清理时自动删除。每条记录只包含定义的审计元数据与白名单摘要，不包含账户 ID、邮件地址、Cookie、App Password、请求参数原值、邮件正文或 Apple 原始响应。定时别名自动化在每次运行状态持久化后也会写入 `定时执行别名自动化` 记录。
 
 ---
 

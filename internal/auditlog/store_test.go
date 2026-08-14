@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -124,5 +126,127 @@ func TestRecordNormalizesUnsafeValues(t *testing.T) {
 	}
 	if _, err := store.Record(RecordInput{Operation: "  "}); err == nil {
 		t.Fatal("record empty operation succeeded")
+	}
+}
+
+func TestRecordUsesOnlyAllowlistedAuditValues(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	store, err := newStore(t.TempDir(), func() time.Time { return now }, false)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	const sensitiveValue = "cookie=qa009-private-value"
+	entry, err := store.Record(RecordInput{
+		RequestID:     sensitiveValue,
+		Level:         LevelError,
+		Operation:     "Audit contract probe",
+		OperationType: sensitiveValue,
+		Status:        502,
+		ErrorCode:     sensitiveValue,
+		Duration:      20 * time.Millisecond,
+		RetryCount:    120,
+		Request: RequestSnapshot{
+			Source:              sensitiveValue,
+			BodyPresent:         true,
+			AliasFilterApplied:  true,
+			PaginationRequested: true,
+		},
+		Response: ResponseSnapshot{CreatedCount: -1, FailedCount: -1},
+	})
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if entry.SchemaVersion != SchemaVersion || !isValidRequestID(entry.RequestID) {
+		t.Errorf("entry schema/request ID = %+v", entry)
+	}
+	if entry.OperationType != OperationTypeUnspecified || entry.ErrorCode != "" || entry.RetryCount != 99 {
+		t.Errorf("entry contract normalization = %+v", entry)
+	}
+	if entry.Request.Source != RequestSourceAPI || !entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || !entry.Request.PaginationRequested {
+		t.Errorf("request snapshot = %+v", entry.Request)
+	}
+	if entry.Response.Success || entry.Response.CreatedCount != 0 || entry.Response.FailedCount != 0 {
+		t.Errorf("response snapshot = %+v", entry.Response)
+	}
+
+	raw, err := os.ReadFile(store.filePath(now))
+	if err != nil {
+		t.Fatalf("read persisted entry: %v", err)
+	}
+	if strings.Contains(string(raw), sensitiveValue) {
+		t.Fatal("sensitive audit input was persisted")
+	}
+}
+
+func TestStoreRecordsConcurrently(t *testing.T) {
+	store, err := newStore(t.TempDir(), time.Now, false)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	const writers = 48
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.Record(RecordInput{
+				Level:         LevelInfo,
+				Operation:     "Concurrent audit operation",
+				OperationType: "inbox",
+				Status:        200,
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent record: %v", err)
+		}
+	}
+
+	entries, err := store.List(writers)
+	if err != nil {
+		t.Fatalf("list concurrent entries: %v", err)
+	}
+	if len(entries) != writers {
+		t.Errorf("concurrent entry count = %d, want %d", len(entries), writers)
+	}
+}
+
+func TestListKeepsLegacyAuditEntriesReadable(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	store, err := newStore(t.TempDir(), func() time.Time { return now }, false)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	legacy := Entry{
+		Timestamp:  now,
+		Level:      LevelInfo,
+		Operation:  "Legacy audit operation",
+		Status:     200,
+		DurationMS: 10,
+	}
+	if err := writeEntries(store.filePath(now), []Entry{legacy}); err != nil {
+		t.Fatalf("write legacy entry: %v", err)
+	}
+
+	entries, err := store.List(1)
+	if err != nil {
+		t.Fatalf("list legacy entry: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("legacy entry count = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.SchemaVersion != 1 || entry.RequestID != "" || entry.OperationType != OperationTypeLegacy {
+		t.Errorf("legacy entry contract = %+v", entry)
+	}
+	if entry.Request.Source != RequestSourceLegacy || !entry.Response.Success {
+		t.Errorf("legacy entry snapshots = request:%+v response:%+v", entry.Request, entry.Response)
 	}
 }

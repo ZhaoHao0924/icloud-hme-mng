@@ -232,11 +232,94 @@ export const platformAuthStatusSchema = z
 
 export const operationLogLevelSchema = z.enum(["info", "warning", "error"]);
 
+export const operationLogErrorCodeSchema = z.enum([
+  "validation_failed",
+  "unauthorized",
+  "forbidden",
+  "not_found",
+  "conflict",
+  "request_too_large",
+  "request_timeout",
+  "rate_limited",
+  "upstream_rejected",
+  "upstream_timeout",
+  "service_unavailable",
+  "internal_failure",
+  "partial_result",
+]);
+
+export const operationLogTypeSchema = z.enum([
+  "auth_session",
+  "auth_setup",
+  "auth_login",
+  "auth_logout",
+  "accounts",
+  "accounts_id",
+  "accounts_id_password",
+  "accounts_id_cookies",
+  "accounts_id_login_start",
+  "accounts_id_login_verify",
+  "accounts_id_alias_automation",
+  "accounts_id_alias_automation_pause",
+  "accounts_id_alias_automation_resume",
+  "accounts_id_alias_automation_preview",
+  "accounts_id_alias_automation_run",
+  "accounts_id_alias_creation_history",
+  "accounts_id_alias_creation_history_csv",
+  "accounts_id_aliases_batch",
+  "create",
+  "inbox",
+  "inbox_messages_id",
+  "aliases",
+  "aliases_id",
+  "aliases_id_deactivate",
+  "aliases_id_reactivate",
+  "reload",
+  "health",
+  "notifications_email",
+  "notifications_email_test",
+  "notifications_webhook",
+  "notifications_webhook_test",
+  "scheduled_alias_automation",
+  "legacy",
+  "unspecified",
+]);
+
+export const operationLogRequestSnapshotSchema = z
+  .object({
+    alias_filter_applied: z.boolean(),
+    body_present: z.boolean(),
+    pagination_requested: z.boolean(),
+    source: z.enum(["api", "scheduler", "legacy"]),
+  })
+  .strip();
+
+export const operationLogResponseSnapshotSchema = z
+  .object({
+    created_count: z.number().int().nonnegative().optional().default(0),
+    failed_count: z.number().int().nonnegative().optional().default(0),
+    success: z.boolean(),
+  })
+  .strip();
+
 export const operationLogEntrySchema = z
   .object({
     duration_ms: z.number().int().nonnegative(),
+    error_code: z
+      .union([z.literal(""), operationLogErrorCodeSchema])
+      .optional()
+      .default(""),
     level: operationLogLevelSchema,
     operation: z.string().min(1),
+    operation_type: operationLogTypeSchema,
+    request: operationLogRequestSnapshotSchema,
+    request_id: z
+      .union([z.literal(""), z.string().regex(/^[0-9a-f]{32}$/)])
+      .optional()
+      .default(""),
+    response: operationLogResponseSnapshotSchema,
+    retry_count: z.number().int().nonnegative(),
+    schema_version: z.number().int().positive(),
     status: z.number().int().nonnegative(),
     timestamp: z.string().min(1),
   })

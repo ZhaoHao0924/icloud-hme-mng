@@ -416,6 +416,12 @@ func TestOperationLogsAreAvailableAndDoNotPersistRequestValues(t *testing.T) {
 	if entry.Operation != "读取收件箱" || entry.Level != auditlog.LevelWarning || entry.Status != res.Code {
 		t.Errorf("operation log = %+v", entry)
 	}
+	if entry.SchemaVersion != auditlog.SchemaVersion || entry.RequestID == "" || entry.OperationType != "inbox" || entry.ErrorCode != auditlog.ErrorCodeValidationFailed {
+		t.Errorf("operation log audit contract = %+v", entry)
+	}
+	if entry.Request.Source != auditlog.RequestSourceAPI || entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || entry.Request.PaginationRequested || entry.Response.Success {
+		t.Errorf("operation log snapshots = request:%+v response:%+v", entry.Request, entry.Response)
+	}
 
 	logsReq := httptest.NewRequest(http.MethodGet, "/api/logs?limit=10", nil)
 	logsRes := httptest.NewRecorder()
@@ -537,6 +543,12 @@ func TestScheduledAliasAutomationRunIsWrittenToOperationLog(t *testing.T) {
 	entry := entries[0]
 	if entry.Operation != "定时执行别名自动化" || entry.Level != auditlog.LevelWarning || entry.Status != http.StatusPartialContent || entry.DurationMS != 125 {
 		t.Errorf("scheduled automation log = %+v", entry)
+	}
+	if entry.SchemaVersion != auditlog.SchemaVersion || entry.RequestID == "" || entry.OperationType != "scheduled_alias_automation" || entry.ErrorCode != auditlog.ErrorCodePartialResult {
+		t.Errorf("scheduled automation audit contract = %+v", entry)
+	}
+	if entry.Request.Source != auditlog.RequestSourceScheduler || entry.Request.BodyPresent || entry.Response.CreatedCount != 2 || entry.Response.FailedCount != 1 || !entry.Response.Success {
+		t.Errorf("scheduled automation snapshots = request:%+v response:%+v", entry.Request, entry.Response)
 	}
 }
 

@@ -560,6 +560,13 @@ export function SettingsPage() {
                         </span>
                         <span>HTTP {entry.status}</span>
                         <span>{formatOperationLogDuration(entry.duration_ms)}</span>
+                        {entry.error_code ? (
+                          <code className="settings-log-code">{entry.error_code}</code>
+                        ) : null}
+                        {entry.retry_count > 0 ? <span>重试 {entry.retry_count} 次</span> : null}
+                        {entry.request_id ? (
+                          <code className="settings-log-request-id">{entry.request_id}</code>
+                        ) : null}
                       </div>
                     </li>
                   );
