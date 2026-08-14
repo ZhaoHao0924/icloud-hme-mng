@@ -1052,7 +1052,7 @@ export function createMockHandlers(
       if (getScenario() === "inbox-html") {
         return successResponse({
           ...message,
-          body: `<!doctype html><html><head><style>.action { display: inline-block; padding: 10px 14px; color: white; background: #1463d2; }</style></head><body><p>请继续完成操作。</p><a class="action" href="https://example.test/continue">打开链接</a><script>window.top.location = "https://attacker.test"</script></body></html>`,
+          body: `<!doctype html><html><head><style>.action { display: inline-block; padding: 10px 14px; color: white; background: #1463d2; }</style></head><body><table style="width: 960px"><tr><td><p>请继续完成操作。</p><a class="action" href="https://example.test/continue">打开链接</a><p>unbroken-email-content-${"x".repeat(180)}</p></td></tr></table><script>window.top.location = "https://attacker.test"</script></body></html>`,
           content_type: "text/html",
           preview: "请继续完成操作。",
         });

@@ -1413,7 +1413,7 @@
   display: grid;
   grid-template-columns: minmax(300px, 0.9fr) minmax(0, 1.1fr);
   gap: var(--space-4);
-  align-items: stretch;
+  align-items: start;
 }
 
 .inbox-message-panel,
@@ -1611,8 +1611,8 @@
 
 .inbox-plain-body {
   min-width: 0;
-  max-height: 20rem;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   color: var(--color-text);
   font-size: var(--font-size-sm);
   line-height: var(--line-height-normal);
@@ -1623,8 +1623,9 @@
 .inbox-html-frame {
   width: 100%;
   min-width: 0;
-  min-height: 24rem;
-  height: min(60vh, 42rem);
+  min-height: 12rem;
+  height: 18rem;
+  display: block;
   background: var(--color-white);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -1632,24 +1633,7 @@
 
 @media (min-width: 761px) {
   .inbox-preview-panel {
-    align-content: stretch;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    max-block-size: calc(var(--inbox-message-row-height) * 10 + 2px);
-  }
-
-  .inbox-preview-copy {
-    min-block-size: 0;
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .inbox-plain-body {
-    min-block-size: 0;
-    max-height: none;
-  }
-
-  .inbox-html-frame {
-    min-block-size: 0;
-    height: 100%;
+    align-content: start;
   }
 }
 

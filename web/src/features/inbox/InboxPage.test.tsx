@@ -87,10 +87,15 @@ describe("InboxPage", () => {
 
     const frame = await screen.findByTitle("邮件正文：登录确认");
     const srcDoc = frame.getAttribute("srcdoc") ?? "";
-    expect(frame).toHaveAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+    expect(frame).toHaveAttribute(
+      "sandbox",
+      "allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+    );
     expect(srcDoc).toContain("https://example.test/open");
     expect(srcDoc).toContain('target="_blank"');
     expect(srcDoc).toContain(".action { color: red; }");
+    expect(srcDoc).toContain("table-layout: fixed !important");
+    expect(srcDoc).toContain("overflow-wrap: anywhere !important");
     expect(srcDoc).not.toContain("javascript:alert");
     expect(srcDoc).not.toContain("<script");
   });

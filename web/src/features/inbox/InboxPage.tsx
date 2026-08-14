@@ -8,7 +8,7 @@ import {
   Server,
 } from "lucide-react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useEffect, useState, type InputHTMLAttributes } from "react";
+import { useCallback, useEffect, useRef, useState, type InputHTMLAttributes } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 
 import { getApiErrorMessage, isApiError } from "../../api/client";
@@ -181,16 +181,100 @@ function buildEmailHtmlDocument(rawHtml: string) {
   const responsiveStyle = documentNode.createElement("style");
   responsiveStyle.textContent = `
     :root { color-scheme: light; }
-    html, body { max-width: 100%; margin: 0; padding: 0; overflow-wrap: anywhere; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      width: 100% !important;
+      max-width: 100% !important;
+      min-width: 0 !important;
+      height: auto !important;
+      min-height: 0 !important;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden !important;
+      overflow-wrap: anywhere;
+    }
     body { padding: 16px; color: #202326; background: #fff; font: 14px/1.55 system-ui, sans-serif; }
+    body * { max-width: 100% !important; min-width: 0 !important; overflow-wrap: anywhere; }
     img, video, canvas, svg { max-width: 100% !important; height: auto !important; }
-    table { max-width: 100% !important; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    table { width: 100% !important; max-width: 100% !important; min-width: 0 !important; table-layout: fixed !important; }
+    td, th { max-width: 100% !important; min-width: 0 !important; overflow-wrap: anywhere !important; word-break: break-word !important; }
+    pre { max-width: 100% !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; }
+    a, code { overflow-wrap: anywhere; word-break: break-word; }
     a { color: #1463d2; }
   `;
-  documentNode.head.prepend(policy, referrer, responsiveStyle);
+  documentNode.head.prepend(policy, referrer);
+  documentNode.head.append(responsiveStyle);
 
   return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
+}
+
+function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const [frameHeight, setFrameHeight] = useState<number | null>(null);
+
+  const readFrameDocument = useCallback(() => {
+    try {
+      return frameRef.current?.contentDocument ?? null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const syncFrameHeight = useCallback(() => {
+    const frameDocument = readFrameDocument();
+    if (!frameDocument) return;
+
+    const measuredHeight = [frameDocument.documentElement, frameDocument.body]
+      .filter((element): element is HTMLElement => element !== null)
+      .reduce(
+        (height, element) =>
+          Math.max(
+            height,
+            element.scrollHeight,
+            element.offsetHeight,
+            Math.ceil(element.getBoundingClientRect().height),
+          ),
+        0,
+      );
+    if (measuredHeight <= 0) return;
+    setFrameHeight((currentHeight) =>
+      currentHeight === measuredHeight ? currentHeight : measuredHeight,
+    );
+  }, [readFrameDocument]);
+
+  const handleFrameLoad = useCallback(() => {
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    syncFrameHeight();
+
+    const frameDocument = readFrameDocument();
+    if (!frameDocument || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(syncFrameHeight);
+    observer.observe(frameDocument.documentElement);
+    if (frameDocument.body) observer.observe(frameDocument.body);
+    resizeObserverRef.current = observer;
+  }, [readFrameDocument, syncFrameHeight]);
+
+  useEffect(() => {
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    return () => resizeObserverRef.current?.disconnect();
+  }, [body]);
+
+  return (
+    <iframe
+      className="inbox-html-frame"
+      ref={frameRef}
+      referrerPolicy="no-referrer"
+      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={buildEmailHtmlDocument(body)}
+      style={frameHeight === null ? undefined : { height: `${frameHeight}px` }}
+      title={title}
+      onLoad={handleFrameLoad}
+    />
+  );
 }
 
 function readMethodMeta(method: "imap" | "web_api") {
@@ -341,13 +425,7 @@ function InboxPreview({
             </button>
           </div>
         ) : isHtml ? (
-          <iframe
-            className="inbox-html-frame"
-            referrerPolicy="no-referrer"
-            sandbox="allow-popups allow-popups-to-escape-sandbox"
-            srcDoc={buildEmailHtmlDocument(body)}
-            title={`邮件正文：${messageSubject(message)}`}
-          />
+          <EmailHtmlFrame body={body} title={`邮件正文：${messageSubject(message)}`} />
         ) : (
           <div className="inbox-plain-body">{body || "无正文内容"}</div>
         )}

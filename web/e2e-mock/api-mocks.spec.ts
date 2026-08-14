@@ -268,7 +268,9 @@ test("inbox appends cursor pages without horizontal overflow", async ({ page }) 
   }
 });
 
-test("inbox keeps excess messages inside a fixed scrolling pane", async ({ page }) => {
+test("inbox keeps excess messages in a fixed list while the body grows naturally", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/accounts/acc_primary/inbox?mock=inbox-scroll");
   await waitForMockWorker(page, "收件箱");
@@ -295,28 +297,24 @@ test("inbox keeps excess messages inside a fixed scrolling pane", async ({ page 
   expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
 
   const previewMetrics = await page.evaluate(() => {
-    const message = document.querySelector<HTMLElement>(".inbox-message-panel");
     const panel = document.querySelector<HTMLElement>(".inbox-preview-panel");
     const copy = panel?.querySelector<HTMLElement>(".inbox-preview-copy");
     const body = copy?.querySelector<HTMLElement>(".inbox-plain-body");
-    const panelRect = panel?.getBoundingClientRect();
-    const copyRect = copy?.getBoundingClientRect();
     return {
       copyHeight: copy?.clientHeight ?? 0,
-      panelBottomGap: panelRect && copyRect ? panelRect.bottom - copyRect.bottom : Number.NaN,
       panelHeight: panel?.getBoundingClientRect().height ?? 0,
-      messagePanelHeight: message?.getBoundingClientRect().height ?? 0,
       previewBodyHeight: body?.clientHeight ?? 0,
       previewBodyMaxHeight: body ? getComputedStyle(body).maxHeight : "",
+      previewBodyScrollHeight: body?.scrollHeight ?? 0,
     };
   });
-  expect(
-    Math.abs(previewMetrics.panelHeight - previewMetrics.messagePanelHeight),
-  ).toBeLessThanOrEqual(1);
-  expect(previewMetrics.panelBottomGap).toBeLessThanOrEqual(24);
-  expect(previewMetrics.copyHeight).toBeGreaterThan(320);
-  expect(previewMetrics.previewBodyHeight).toBeGreaterThan(320);
+  expect(previewMetrics.panelHeight).toBeGreaterThan(0);
+  expect(previewMetrics.copyHeight).toBeGreaterThan(0);
+  expect(previewMetrics.previewBodyHeight).toBeGreaterThan(0);
   expect(previewMetrics.previewBodyMaxHeight).toBe("none");
+  expect(previewMetrics.previewBodyScrollHeight).toBeLessThanOrEqual(
+    previewMetrics.previewBodyHeight + 1,
+  );
 
   const scrolled = await messageList.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
@@ -401,7 +399,9 @@ test("inbox long content fits each responsive layout without horizontal overflow
       expect(dimensions.messageScrollWidth).toBeLessThanOrEqual(dimensions.messageWidth);
     }
     expect(dimensions.previewScrollWidth).toBeLessThanOrEqual(dimensions.previewWidth);
-    expect(dimensions.previewCopyScrollHeight).toBeGreaterThan(dimensions.previewCopyHeight);
+    expect(dimensions.previewCopyScrollHeight).toBeLessThanOrEqual(
+      dimensions.previewCopyHeight + 1,
+    );
     if (viewport.width > 760) await expect(messageItem).toBeVisible();
     await expect(previewPanel).toBeVisible();
   }
@@ -432,7 +432,7 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   await expect(frameElement).toBeVisible();
   await expect(frameElement).toHaveAttribute(
     "sandbox",
-    "allow-popups allow-popups-to-escape-sandbox",
+    "allow-same-origin allow-popups allow-popups-to-escape-sandbox",
   );
 
   const bodyFrame = page.frameLocator('iframe[title="邮件正文：登录确认"]');
@@ -441,6 +441,45 @@ test("HTML email styles and links render inside a script-isolated frame", async 
   await expect(link).toHaveAttribute("target", "_blank");
   await expect(link).toHaveCSS("background-color", "rgb(20, 99, 210)");
   await expect(bodyFrame.locator("script")).toHaveCount(0);
+
+  const frameMetrics = await frameElement.evaluate((element) => {
+    const frame = element as HTMLIFrameElement;
+    const frameDocument = frame.contentDocument;
+    return {
+      documentHeight: frameDocument?.documentElement.scrollHeight ?? 0,
+      documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
+      frameHeight: frame.getBoundingClientRect().height,
+      frameWidth: frame.clientWidth,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(frameMetrics.documentHeight).toBeGreaterThan(0);
+  expect(frameMetrics.documentWidth).toBeLessThanOrEqual(frameMetrics.frameWidth);
+  expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.documentHeight - 2);
+  expect(frameMetrics.frameWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".inbox-preview-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "选择邮件 登录确认" }).click();
+  const mobileFrame = page.getByTitle("邮件正文：登录确认");
+  await expect(mobileFrame).toBeVisible();
+  const mobileFrameMetrics = await mobileFrame.evaluate((element) => {
+    const frame = element as HTMLIFrameElement;
+    const frameDocument = frame.contentDocument;
+    return {
+      documentHeight: frameDocument?.documentElement.scrollHeight ?? 0,
+      documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
+      frameHeight: frame.getBoundingClientRect().height,
+      frameWidth: frame.clientWidth,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(mobileFrameMetrics.documentHeight).toBeGreaterThan(0);
+  expect(mobileFrameMetrics.documentWidth).toBeLessThanOrEqual(mobileFrameMetrics.frameWidth);
+  expect(mobileFrameMetrics.frameHeight).toBeGreaterThanOrEqual(
+    mobileFrameMetrics.documentHeight - 2,
+  );
+  expect(mobileFrameMetrics.frameWidth).toBeLessThanOrEqual(mobileFrameMetrics.viewportWidth);
 });
 
 test("inbox keeps its filters visible for Apple fallback errors and gateway timeouts", async ({
