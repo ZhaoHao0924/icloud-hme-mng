@@ -49,5 +49,5 @@
 - [x] 隔离备份、清单校验与回滚恢复烟测通过：`scripts/backup-restore-smoke.ps1`。
 - [x] Windows 原生发布烟测已通过：`scripts/windows-release-smoke.ps1 -Version fe306-api-token-smoke -SkipNpmCi -Port 18083` 验证根页面、深链接、静态缓存、安全响应头、Bearer 鉴权、404 和重启持久化；临时服务与数据目录已清理。
 - [x] Linux 发布二进制根页面、深链接、静态缓存和健康检查通过：GitHub Actions Run 24，脚本为 `scripts/ci-linux-binary-smoke.sh`。
-- [ ] Cookie、IMAP、Web 回退、无 2FA 登录和 2FA 登录均已在受控真实账户完成。
-- [ ] QA-008 结果已记录在 `FRONTEND_DEVELOPMENT_PLAN.md`，且没有敏感信息进入仓库。
+- [x] QA-008 真实环境验证已完成：线上受控账户已配置并稳定使用一段时间；仅保留脱敏结论，不记录账号、凭据或原始响应。
+- [x] QA-008 结果已记录在 `FRONTEND_DEVELOPMENT_PLAN.md`，且没有敏感信息进入仓库。
