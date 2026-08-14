@@ -1014,11 +1014,13 @@ export function createMockHandlers(
         });
       }
       const messages =
-        scenario === "inbox-long"
-          ? inboxLongMessageFixtures
-          : scenario === "inbox-scroll"
-            ? inboxScrollMessageFixtures
-            : inboxMessageFixtures;
+        scenario === "inbox-html"
+          ? inboxMessageFixtures.map((message) => ({ ...message, preview: "" }))
+          : scenario === "inbox-long"
+            ? inboxLongMessageFixtures
+            : scenario === "inbox-scroll"
+              ? inboxScrollMessageFixtures
+              : inboxMessageFixtures;
       return scenarioResponse(
         getScenario,
         {
@@ -1040,6 +1042,26 @@ export function createMockHandlers(
           next_cursor: "",
         },
       );
+    }),
+    http.get("*/api/inbox/messages/:messageId", ({ params }) => {
+      const messageId = String(params.messageId);
+      const message = inboxMessageFixtures.find((candidate) => candidate.id === messageId);
+      if (!message) {
+        return HttpResponse.json({ message: "邮件不存在", success: false }, { status: 404 });
+      }
+      if (getScenario() === "inbox-html") {
+        return successResponse({
+          ...message,
+          body: `<!doctype html><html><head><style>.action { display: inline-block; padding: 10px 14px; color: white; background: #1463d2; }</style></head><body><p>请继续完成操作。</p><a class="action" href="https://example.test/continue">打开链接</a><script>window.top.location = "https://attacker.test"</script></body></html>`,
+          content_type: "text/html",
+          preview: "请继续完成操作。",
+        });
+      }
+      return successResponse({
+        ...message,
+        body: message.preview,
+        content_type: "text/plain",
+      });
     }),
     http.get("*/api/health", () =>
       scenarioResponse(getScenario, healthyServiceFixture, degradedServiceFixture),

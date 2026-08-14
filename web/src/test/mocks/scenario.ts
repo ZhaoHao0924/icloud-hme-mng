@@ -12,6 +12,7 @@ export const mockScenarios = [
   "inbox-error",
   "inbox-timeout",
   "inbox-long",
+  "inbox-html",
   "inbox-paged",
   "inbox-scroll",
   "platform-login",

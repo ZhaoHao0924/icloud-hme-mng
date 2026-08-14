@@ -23,6 +23,7 @@ type inboxIMAPClient interface {
 		days int,
 		beforeUID uint32,
 	) (mail.MessagePage, error)
+	GetFull(uid uint32) (*mail.FullMessage, error)
 	GetPreview(uid uint32) (*mail.Message, error)
 	ListInboxPage(limit int, days int, beforeUID uint32) (mail.MessagePage, error)
 	ListInboxSummariesPage(limit int, days int, beforeUID uint32) (mail.MessagePage, error)

@@ -319,7 +319,7 @@ func shouldServeSPAFallback(request *http.Request) bool {
 func securityResponseHeaders(c *gin.Context) {
 	c.Header(
 		"Content-Security-Policy",
-		"default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
+		"default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self' data: http: https:; form-action 'self'; frame-ancestors 'none'; frame-src 'self'; img-src 'self' data: http: https:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' http: https:",
 	)
 	c.Header("Cross-Origin-Opener-Policy", "same-origin")
 	c.Header("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
@@ -699,7 +699,7 @@ func (s *Server) loadFirstInboxPreview(accountID string, messages []mail.Message
 	s.inboxPreviews.Set(accountID, *message)
 }
 
-// getInboxMessage 按 IMAP UID 读取单封邮件预览，供轻量列表按需加载正文。
+// getInboxMessage 按 IMAP UID 读取单封邮件完整正文，供详情视图按需加载。
 func (s *Server) getInboxMessage(c *gin.Context) {
 	accountID := strings.TrimSpace(c.Query("account_id"))
 	if accountID == "" {
@@ -712,15 +712,15 @@ func (s *Server) getInboxMessage(c *gin.Context) {
 		return
 	}
 	messageID := strconv.FormatUint(uid, 10)
-	if message, found := s.inboxPreviews.Get(accountID, messageID); found {
+	if message, found := s.inboxPreviews.GetFull(accountID, messageID); found {
 		ok(c, message)
 		return
 	}
 
-	var message *mail.Message
+	var message *mail.FullMessage
 	var imapOperationErr error
 	err = s.withInboxIMAPClient(accountID, func(mc inboxIMAPClient) error {
-		message, imapOperationErr = mc.GetPreview(uint32(uid))
+		message, imapOperationErr = mc.GetFull(uint32(uid))
 		if imapOperationErr == nil && message == nil {
 			imapOperationErr = errors.New("IMAP 未返回邮件内容")
 		}
@@ -739,7 +739,7 @@ func (s *Server) getInboxMessage(c *gin.Context) {
 		fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
 		return
 	}
-	s.inboxPreviews.Set(accountID, *message)
+	s.inboxPreviews.SetFull(accountID, *message)
 	ok(c, message)
 }
 

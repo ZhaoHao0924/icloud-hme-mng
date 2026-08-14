@@ -548,6 +548,9 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
+	if uid == 0 {
+		return nil, fmt.Errorf("邮件 UID 无效")
+	}
 	if err := c.ensureSelectedMailbox("INBOX", true); err != nil {
 		return nil, err
 	}
@@ -572,12 +575,12 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 	}
 
 	full := &FullMessage{Message: toMessage(msg)}
-	// 解析正文
 	if r := msg.GetBody(&imap.BodySectionName{}); r != nil {
 		if em, err := mail.ReadMessage(r); err == nil {
-			body, _ := readBody(em)
+			body, contentType, preview, _ := readRenderableBody(em)
 			full.Body = body
-			full.ContentType = em.Header.Get("Content-Type")
+			full.ContentType = contentType
+			full.Preview = preview
 		}
 	}
 	return full, nil
@@ -675,6 +678,25 @@ func readBody(msg *mail.Message) (string, error) {
 		return stripHTML(candidates.html), nil
 	}
 	return "", err
+}
+
+// readRenderableBody 保留 HTML 邮件的结构和内联样式，供隔离的前端正文视图使用。
+// 文本预览仍从纯文本部分或 HTML 可见文本生成，避免列表展示标签和脚本内容。
+func readRenderableBody(msg *mail.Message) (body, contentType, preview string, err error) {
+	candidates, readErr := readBodyCandidates(msg.Header, msg.Body)
+	plain := normalizePlainText(candidates.plain)
+	htmlBody := strings.TrimSpace(strings.ToValidUTF8(candidates.html, ""))
+	if htmlBody != "" {
+		previewText := plain
+		if previewText == "" {
+			previewText = stripHTML(htmlBody)
+		}
+		return htmlBody, "text/html", truncatePreview(previewText), nil
+	}
+	if plain != "" {
+		return plain, "text/plain", truncatePreview(plain), nil
+	}
+	return "", "text/plain", "", readErr
 }
 
 func readBodyCandidates(header mailHeader, body io.Reader) (mailBodyCandidates, error) {

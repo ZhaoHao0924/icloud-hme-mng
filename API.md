@@ -285,6 +285,34 @@ Web API 模式将时间戳规范为 UTC RFC3339、按时间倒序返回，并将
 - `date` — 两条路径均为 RFC3339；Web API 统一为 UTC
 - `preview` — 正文摘要,非完整正文；两条路径最多返回 4 KiB UTF-8 数据
 
+### 2.1 读取单封邮件正文
+
+```http
+GET /api/inbox/messages/:id?account_id=acc_1
+```
+
+该接口按 IMAP UID 读取一封邮件的完整可渲染正文，仅在配置了 App Password 的 IMAP 路径可用。`id` 必须是有效的 IMAP UID；Web API 邮件的 GUID 不适用此接口。
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "1042",
+    "from": "GitHub <noreply@github.com>",
+    "to": "xyz123@icloud.com",
+    "subject": "请确认你的登录操作",
+    "date": "2026-07-09T14:32:10+08:00",
+    "preview": "请继续完成操作。",
+    "body": "<p>请继续完成操作。</p><a href=\"https://example.com/continue\">打开链接</a>",
+    "content_type": "text/html"
+  }
+}
+```
+
+- `body` — 完整正文，不包含附件；可能为 `text/plain` 或 `text/html`。
+- `content_type` — 正文的规范化类型，当前为 `text/plain` 或 `text/html`。
+- HTML 正文来自邮件内容，属于不可信数据。客户端必须在禁用脚本的隔离容器中渲染，不能直接注入应用页面。
+
 ---
 
 ## 账号管理接口

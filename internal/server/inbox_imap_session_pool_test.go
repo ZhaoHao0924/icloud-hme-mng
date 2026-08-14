@@ -17,6 +17,9 @@ type fakeInboxIMAPClient struct {
 	listSummariesCalls         int
 	listSummariesNextBeforeUID uint32
 	lastListSummariesBeforeUID uint32
+	fullMessage                 *mail.FullMessage
+	getFullCalls                int
+	lastFullUID                 uint32
 }
 
 func (c *fakeInboxIMAPClient) Connect() error {
@@ -54,6 +57,16 @@ func (c *fakeInboxIMAPClient) FindByRecipientSummariesPage(
 
 func (c *fakeInboxIMAPClient) GetPreview(uint32) (*mail.Message, error) {
 	return nil, errors.New("not implemented")
+}
+
+func (c *fakeInboxIMAPClient) GetFull(uid uint32) (*mail.FullMessage, error) {
+	c.getFullCalls++
+	c.lastFullUID = uid
+	if c.fullMessage == nil {
+		return nil, errors.New("not implemented")
+	}
+	message := *c.fullMessage
+	return &message, nil
 }
 
 func (c *fakeInboxIMAPClient) ListInbox(int, int) ([]mail.Message, error) {

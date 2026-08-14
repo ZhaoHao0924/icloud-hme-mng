@@ -316,7 +316,7 @@ func TestEmbeddedBuiltAssetIsServed(t *testing.T) {
 func TestFrontendAndAPIResponsesHaveExpectedCacheAndSecurityHeaders(t *testing.T) {
 	srv := newTestServer(t, "")
 	headers := map[string]string{
-		"Content-Security-Policy":    "default-src 'self'",
+		"Content-Security-Policy":    "style-src 'self' 'unsafe-inline'",
 		"Cross-Origin-Opener-Policy": "same-origin",
 		"Permissions-Policy":         "camera=(), geolocation=(), microphone=()",
 		"Referrer-Policy":            "no-referrer",
@@ -908,9 +908,13 @@ func TestLoadFirstInboxPreviewFailureKeepsSummary(t *testing.T) {
 	}
 }
 
-func TestInboxMessageReturnsCachedPreviewWithoutAccountLookup(t *testing.T) {
+func TestInboxMessageReturnsCachedFullMessageWithoutAccountLookup(t *testing.T) {
 	srv := newTestServer(t, "")
-	srv.inboxPreviews.Set("acc_cached", mail.Message{ID: "7", Preview: "cached body"})
+	srv.inboxPreviews.SetFull("acc_cached", mail.FullMessage{
+		Message:     mail.Message{ID: "7", Preview: "cached body"},
+		Body:        `<p>cached <a href="https://example.test">body</a></p>`,
+		ContentType: "text/html",
+	})
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/inbox/messages/007?account_id=acc_cached",
@@ -923,8 +927,42 @@ func TestInboxMessageReturnsCachedPreviewWithoutAccountLookup(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "cached body") {
-		t.Errorf("response does not contain cached preview: %s", res.Body.String())
+	if !strings.Contains(res.Body.String(), "content_type") || !strings.Contains(res.Body.String(), "https://example.test") {
+		t.Errorf("response does not contain cached full message: %s", res.Body.String())
+	}
+}
+
+func TestInboxMessageLoadsAndCachesFullMessage(t *testing.T) {
+	srv := newTestServer(t, "")
+	client := &fakeInboxIMAPClient{fullMessage: &mail.FullMessage{
+		Message:     mail.Message{ID: "7", Subject: "HTML message", Preview: "Open account"},
+		Body:        `<a href="https://example.test/account">Open account</a>`,
+		ContentType: "text/html",
+	}}
+	srv.newInboxIMAPClient = func(accountID string) (inboxIMAPClient, error) {
+		if accountID != "acc_main" {
+			t.Errorf("account ID = %q, want acc_main", accountID)
+		}
+		return client, nil
+	}
+
+	for range 2 {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/api/inbox/messages/7?account_id=acc_main",
+			nil,
+		)
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", res.Code, http.StatusOK, res.Body.String())
+		}
+		if !strings.Contains(res.Body.String(), "text/html") || !strings.Contains(res.Body.String(), "example.test/account") {
+			t.Errorf("response does not contain full HTML message: %s", res.Body.String())
+		}
+	}
+	if client.getFullCalls != 1 || client.lastFullUID != 7 {
+		t.Fatalf("GetFull calls = %d for UID %d, want one call for UID 7", client.getFullCalls, client.lastFullUID)
 	}
 }
 

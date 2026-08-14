@@ -1,4 +1,5 @@
-import { Cloud, KeyRound, LogOut, Settings, Users } from "lucide-react";
+import { Cloud, KeyRound, LogOut, Menu, Settings, Users, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigation, useOutlet } from "react-router-dom";
 
 import { LoadingState } from "../components/LoadingState";
@@ -34,8 +35,34 @@ export function App() {
   const navigationState = useNavigation().state;
   const outlet = useOutlet();
   const isNavigating = navigationState !== "idle";
+  const [mobileMenuPath, setMobileMenuPath] = useState<string | null>(null);
+  const mobileMenuOpen = mobileMenuPath === pathname;
+  const sidebarRef = useRef<HTMLElement>(null);
   const { clearApiToken, hasApiToken, openApiTokenDialog } = useApiToken();
   const { isLoggingOut, logout, status } = usePlatformAuth();
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!sidebarRef.current?.contains(event.target as Node)) {
+        setMobileMenuPath(null);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMobileMenuPath(null);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [mobileMenuOpen]);
 
   async function handleLogout() {
     clearApiToken();
@@ -44,7 +71,7 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
             <Cloud size={20} strokeWidth={2} />
@@ -52,13 +79,33 @@ export function App() {
           <span>iCloud HME</span>
         </div>
 
-        <nav className="primary-nav" aria-label="主导航">
+        <button
+          aria-controls="primary-navigation"
+          aria-expanded={mobileMenuOpen}
+          aria-label={mobileMenuOpen ? "收起主菜单" : "展开主菜单"}
+          className="icon-button mobile-menu-button"
+          type="button"
+          onClick={() => setMobileMenuPath((current) => (current === pathname ? null : pathname))}
+        >
+          {mobileMenuOpen ? (
+            <X size={19} aria-hidden="true" />
+          ) : (
+            <Menu size={19} aria-hidden="true" />
+          )}
+        </button>
+
+        <nav
+          className={`primary-nav${mobileMenuOpen ? " primary-nav-open" : ""}`}
+          id="primary-navigation"
+          aria-label="主导航"
+        >
           {navigation.map(({ to, label, icon: Icon }) => (
             <NavLink
               className={({ isActive }) => `nav-link${isActive ? " nav-link-active" : ""}`}
               end={to === "/settings"}
               key={to}
               to={to}
+              onClick={() => setMobileMenuPath(null)}
             >
               <Icon size={18} aria-hidden="true" />
               <span>{label}</span>

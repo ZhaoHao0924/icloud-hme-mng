@@ -1,6 +1,14 @@
-import { ChevronDown, Globe2, Inbox, LoaderCircle, RefreshCw, Server } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  Globe2,
+  Inbox,
+  LoaderCircle,
+  RefreshCw,
+  Server,
+} from "lucide-react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useState, type InputHTMLAttributes } from "react";
+import { useEffect, useState, type InputHTMLAttributes } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 
 import { getApiErrorMessage, isApiError } from "../../api/client";
@@ -18,6 +26,24 @@ import { AccountRequestErrorState } from "../security/SessionRecoveryView";
 
 const dayOptions = [1, 3, 7, 14, 30] as const;
 const limitOptions = [10, 20, 50] as const;
+const mobileInboxMediaQuery = "(max-width: 760px)";
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window.matchMedia === "function" ? window.matchMedia(query).matches : false,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia(query);
+    const updateMatch = () => setMatches(mediaQuery.matches);
+    updateMatch();
+    mediaQuery.addEventListener("change", updateMatch);
+    return () => mediaQuery.removeEventListener("change", updateMatch);
+  }, [query]);
+
+  return matches;
+}
 
 type DraftFilterInputProps = Omit<
   InputHTMLAttributes<HTMLInputElement>,
@@ -84,6 +110,87 @@ function formatInboxDate(value: string) {
 
 function messageSubject(message: InboxMessage) {
   return message.subject || "（无主题）";
+}
+
+function looksLikeHtml(value: string) {
+  return /<(?:!doctype|html|head|body|style|table|div|p|a)\b/i.test(value);
+}
+
+function safeEmailURL(value: string, protocols: string[]) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("#")) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    return protocols.includes(parsed.protocol) ? trimmed : "";
+  } catch {
+    return "";
+  }
+}
+
+function buildEmailHtmlDocument(rawHtml: string) {
+  const documentNode = new DOMParser().parseFromString(rawHtml, "text/html");
+
+  documentNode
+    .querySelectorAll("script, iframe, object, embed, input, textarea, select, button")
+    .forEach((element) => element.remove());
+  documentNode.querySelectorAll("form").forEach((form) => form.replaceWith(...form.childNodes));
+  documentNode
+    .querySelectorAll('meta[http-equiv="refresh"], base')
+    .forEach((element) => element.remove());
+  documentNode.querySelectorAll<HTMLElement>("*").forEach((element) => {
+    for (const attribute of Array.from(element.attributes)) {
+      if (attribute.name.toLowerCase().startsWith("on")) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  });
+  documentNode.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
+    const href = safeEmailURL(anchor.getAttribute("href") ?? "", [
+      "http:",
+      "https:",
+      "mailto:",
+      "tel:",
+    ]);
+    if (href) {
+      anchor.href = href;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+    } else {
+      anchor.removeAttribute("href");
+    }
+  });
+  documentNode.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+    const source = safeEmailURL(image.getAttribute("src") ?? "", [
+      "http:",
+      "https:",
+      "data:",
+      "cid:",
+    ]);
+    if (source) image.src = source;
+    else image.removeAttribute("src");
+    image.removeAttribute("srcset");
+  });
+
+  const policy = documentNode.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content =
+    "default-src 'none'; img-src http: https: data: cid:; style-src 'unsafe-inline' http: https:; font-src http: https: data:; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
+  const referrer = documentNode.createElement("meta");
+  referrer.name = "referrer";
+  referrer.content = "no-referrer";
+  const responsiveStyle = documentNode.createElement("style");
+  responsiveStyle.textContent = `
+    :root { color-scheme: light; }
+    html, body { max-width: 100%; margin: 0; padding: 0; overflow-wrap: anywhere; }
+    body { padding: 16px; color: #202326; background: #fff; font: 14px/1.55 system-ui, sans-serif; }
+    img, video, canvas, svg { max-width: 100% !important; height: auto !important; }
+    table { max-width: 100% !important; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    a { color: #1463d2; }
+  `;
+  documentNode.head.prepend(policy, referrer, responsiveStyle);
+
+  return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
 }
 
 function readMethodMeta(method: "imap" | "web_api") {
@@ -171,17 +278,33 @@ function InboxMessageList({
 
 function InboxPreview({
   message,
+  onBack,
   onRetryPreview,
   previewError,
   previewPending,
 }: {
   message: InboxMessage;
+  onBack?: () => void;
   onRetryPreview: () => void;
   previewError: unknown;
   previewPending: boolean;
 }) {
+  const body = message.body?.trim() || message.preview;
+  const isHtml =
+    message.content_type?.toLowerCase().startsWith("text/html") === true || looksLikeHtml(body);
+
   return (
     <section className="table-frame inbox-preview-panel" aria-labelledby="inbox-preview-title">
+      {onBack ? (
+        <button
+          className="button button-secondary inbox-preview-back"
+          type="button"
+          onClick={onBack}
+        >
+          <ArrowLeft size={15} aria-hidden="true" />
+          返回邮件列表
+        </button>
+      ) : null}
       <div className="inbox-preview-heading">
         <span className="record-count">邮件摘要</span>
         <h4 id="inbox-preview-title">{messageSubject(message)}</h4>
@@ -203,7 +326,7 @@ function InboxPreview({
         </div>
       </dl>
       <div className="inbox-preview-copy">
-        <span>预览</span>
+        <span>正文</span>
         {previewPending ? (
           <div className="inbox-preview-loading" role="status" aria-live="polite">
             <LoaderCircle className="loading-state-icon" size={18} aria-hidden="true" />
@@ -217,8 +340,16 @@ function InboxPreview({
               重新加载
             </button>
           </div>
+        ) : isHtml ? (
+          <iframe
+            className="inbox-html-frame"
+            referrerPolicy="no-referrer"
+            sandbox="allow-popups allow-popups-to-escape-sandbox"
+            srcDoc={buildEmailHtmlDocument(body)}
+            title={`邮件正文：${messageSubject(message)}`}
+          />
         ) : (
-          <p>{message.preview || "无预览内容"}</p>
+          <div className="inbox-plain-body">{body || "无正文内容"}</div>
         )}
       </div>
     </section>
@@ -228,6 +359,7 @@ function InboxPreview({
 export function InboxPage() {
   const { account } = useAccountDetailContext();
   const navigate = useNavigate();
+  const isMobileInbox = useMediaQuery(mobileInboxMediaQuery);
   const [searchParams, setSearchParams] = useSearchParams();
   const accountsQuery = useQuery(accountsQueryOptions());
   const aliasesQuery = useQuery(aliasesQueryOptions(account.id));
@@ -237,7 +369,13 @@ export function InboxPage() {
   const aliases = aliasesQuery.data?.aliases ?? [];
   const inboxQueryEnabled = account.id !== "";
   const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const selectionContextKey = `${account.id}\u0000${selectedAlias}\u0000${days}\u0000${limit}`;
+  const [messageSelection, setMessageSelection] = useState<{
+    contextKey: string;
+    messageId: string;
+  } | null>(null);
+  const selectedMessageId =
+    messageSelection?.contextKey === selectionContextKey ? messageSelection.messageId : null;
   const inboxQuery = useInfiniteQuery({
     ...inboxInfiniteQueryOptions(
       { accountId: account.id, alias: selectedAlias, days, limit },
@@ -251,7 +389,9 @@ export function InboxPage() {
   const hasInboxData = inboxQuery.data !== undefined;
   const loadMoreError = inboxQuery.isFetchNextPageError ? inboxQuery.error : null;
   const selectedMessageSummary =
-    messages.find((message) => message.id === selectedMessageId) ?? messages[0] ?? null;
+    messages.find((message) => message.id === selectedMessageId) ??
+    (!isMobileInbox ? messages[0] : null) ??
+    null;
   const selectedMessageNeedsPreview =
     inboxPages[0]?.method === "imap" && selectedMessageSummary?.preview === "";
   const selectedMessageQuery = useQuery({
@@ -297,6 +437,12 @@ export function InboxPage() {
     navigate(accountPath(nextAccountId, nextParams.toString()), { replace: true });
   }
 
+  function resetMobileScrollPosition() {
+    if (!isMobileInbox) return;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
+
   function commitAccountInput(inputValue: string) {
     const value = inputValue.trim();
     const matchedAccount = accounts.find(
@@ -311,7 +457,10 @@ export function InboxPage() {
   }
 
   return (
-    <section className="inbox-page" aria-labelledby="inbox-page-title">
+    <section
+      className={`inbox-page${isMobileInbox && selectedMessage ? " inbox-page-message-open" : ""}`}
+      aria-labelledby="inbox-page-title"
+    >
       <div className="section-heading">
         <div>
           <h3 id="inbox-page-title">邮件收件箱</h3>
@@ -340,7 +489,7 @@ export function InboxPage() {
             title="刷新收件箱"
             type="button"
             onClick={() => {
-              setSelectedMessageId(null);
+              setMessageSelection(null);
               setInboxRefreshKey((value) => value + 1);
             }}
           >
@@ -474,24 +623,39 @@ export function InboxPage() {
             </div>
           ) : null}
 
-          {selectedMessage ? (
+          {messages.length > 0 ? (
             <div className="inbox-content-grid">
-              <InboxMessageList
-                messages={messages}
-                canLoadMore={inboxQuery.hasNextPage}
-                loadMoreError={loadMoreError}
-                loadingMore={inboxQuery.isFetchingNextPage}
-                selectedMessageId={selectedMessage.id}
-                selectedMessagePreview={selectedMessage.preview}
-                onLoadMore={() => void inboxQuery.fetchNextPage()}
-                onSelect={setSelectedMessageId}
-              />
-              <InboxPreview
-                message={selectedMessage}
-                previewError={selectedMessageNeedsPreview ? selectedMessageQuery.error : null}
-                previewPending={selectedMessageNeedsPreview && selectedMessageQuery.isPending}
-                onRetryPreview={() => void selectedMessageQuery.refetch()}
-              />
+              {!isMobileInbox || !selectedMessage ? (
+                <InboxMessageList
+                  messages={messages}
+                  canLoadMore={inboxQuery.hasNextPage}
+                  loadMoreError={loadMoreError}
+                  loadingMore={inboxQuery.isFetchingNextPage}
+                  selectedMessageId={selectedMessage?.id ?? ""}
+                  selectedMessagePreview={selectedMessage?.preview ?? ""}
+                  onLoadMore={() => void inboxQuery.fetchNextPage()}
+                  onSelect={(messageId) => {
+                    setMessageSelection({ contextKey: selectionContextKey, messageId });
+                    resetMobileScrollPosition();
+                  }}
+                />
+              ) : null}
+              {selectedMessage ? (
+                <InboxPreview
+                  message={selectedMessage}
+                  previewError={selectedMessageNeedsPreview ? selectedMessageQuery.error : null}
+                  previewPending={selectedMessageNeedsPreview && selectedMessageQuery.isPending}
+                  onBack={
+                    isMobileInbox
+                      ? () => {
+                          setMessageSelection(null);
+                          resetMobileScrollPosition();
+                        }
+                      : undefined
+                  }
+                  onRetryPreview={() => void selectedMessageQuery.refetch()}
+                />
+              ) : null}
             </div>
           ) : null}
         </>

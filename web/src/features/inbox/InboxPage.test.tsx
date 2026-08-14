@@ -2,7 +2,7 @@ import { HttpResponse, http } from "msw";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppProviders } from "../../app/AppProviders";
 import { createQueryClient } from "../../app/queryClient";
@@ -21,7 +21,80 @@ function renderInbox(path = "/accounts/acc_primary/inbox") {
   return { ...view, queryClient, router };
 }
 
+function useMobileViewport() {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn().mockImplementation((query: string) => ({
+      addEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      matches: query === "(max-width: 760px)",
+      media: query,
+      onchange: null,
+      removeEventListener: vi.fn(),
+    })),
+  );
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("InboxPage", () => {
+  it("uses a list-first mobile flow and returns from a selected message", async () => {
+    useMobileViewport();
+    const user = userEvent.setup();
+    renderInbox();
+
+    await screen.findByRole("list", { name: "邮件摘要列表" });
+    expect(screen.queryByRole("region", { name: "登录确认" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "选择邮件 登录确认" }));
+
+    expect(screen.queryByRole("list", { name: "邮件摘要列表" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "登录确认" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回邮件列表" }));
+
+    expect(await screen.findByRole("list", { name: "邮件摘要列表" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "登录确认" })).not.toBeInTheDocument();
+  });
+
+  it("renders HTML bodies in a script-isolated frame with usable links", async () => {
+    server.use(
+      http.get("*/api/inbox", () =>
+        HttpResponse.json({
+          data: {
+            account_id: "acc_primary",
+            alias: "",
+            count: 1,
+            messages: [{ ...inboxMessageFixtures[0], preview: "" }],
+            method: "imap",
+          },
+          success: true,
+        }),
+      ),
+      http.get("*/api/inbox/messages/:messageId", () =>
+        HttpResponse.json({
+          data: {
+            ...inboxMessageFixtures[0],
+            body: `<style>.action { color: red; }</style><a class="action" href="https://example.test/open">打开链接</a><a href="javascript:alert(1)">危险链接</a><script>alert(1)</script>`,
+            content_type: "text/html",
+          },
+          success: true,
+        }),
+      ),
+    );
+    renderInbox();
+
+    const frame = await screen.findByTitle("邮件正文：登录确认");
+    const srcDoc = frame.getAttribute("srcdoc") ?? "";
+    expect(frame).toHaveAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+    expect(srcDoc).toContain("https://example.test/open");
+    expect(srcDoc).toContain('target="_blank"');
+    expect(srcDoc).toContain(".action { color: red; }");
+    expect(srcDoc).not.toContain("javascript:alert");
+    expect(srcDoc).not.toContain("<script");
+  });
+
   it("loads the current account inbox and exposes its aliases as a URL-backed filter", async () => {
     const requests: URL[] = [];
     server.use(

@@ -195,6 +195,8 @@ export const inboxMessageSchema = z
     subject: z.string(),
     date: z.string(),
     preview: z.string(),
+    body: z.string().optional(),
+    content_type: z.string().optional(),
   })
   .strip();
 

@@ -60,6 +60,20 @@ for (const viewport of qa010Viewports) {
     await waitForMockWorker(page, "账户");
     await expectNoHorizontalOverflow(page);
 
+    const primaryNavigation = page.getByRole("navigation", { name: "主导航" });
+    if (viewport.width <= 760) {
+      const menuButton = page.getByRole("button", { name: "展开主菜单" });
+      await expect(menuButton).toBeVisible();
+      await expect(primaryNavigation).toBeHidden();
+      await menuButton.click();
+      await expect(primaryNavigation).toBeVisible();
+      await page.getByRole("button", { name: "收起主菜单" }).click();
+      await expect(primaryNavigation).toBeHidden();
+    } else {
+      await expect(page.getByRole("button", { name: "展开主菜单" })).toBeHidden();
+      await expect(primaryNavigation).toBeVisible();
+    }
+
     const addAccount = page.getByRole("button", { name: "添加账户", exact: true });
     await expectReachable(page, addAccount);
     await addAccount.focus();

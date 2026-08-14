@@ -147,6 +147,7 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
       ) : (
         <div className="creation-history-table-wrap">
           <table className="creation-history-table">
+            <caption className="visually-hidden">自动化创建历史</caption>
             <thead>
               <tr>
                 <th scope="col">批次</th>
@@ -164,11 +165,13 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
                 return (
                   <Fragment key={entry.batch_id}>
                     <tr className="creation-history-row">
-                      <td className="creation-history-batch">
+                      <td className="creation-history-batch" data-label="批次">
                         <code>{entry.batch_id}</code>
                       </td>
-                      <td className="creation-history-source">{triggerLabel(entry.trigger)}</td>
-                      <td className="creation-history-result">
+                      <td className="creation-history-source" data-label="来源">
+                        {triggerLabel(entry.trigger)}
+                      </td>
+                      <td className="creation-history-result" data-label="结果">
                         <span
                           className={`creation-history-status creation-history-status-${entry.status}`}
                         >
@@ -178,7 +181,7 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
                           <span className="creation-history-error">{entry.error}</span>
                         ) : null}
                       </td>
-                      <td className="creation-history-quantity">
+                      <td className="creation-history-quantity" data-label="数量">
                         <span className="creation-history-quantity-value">
                           {entry.created} / {entry.requested}
                         </span>
@@ -186,8 +189,10 @@ export function AliasCreationHistoryPanel({ accountId }: AliasCreationHistoryPan
                           <span className="creation-history-failed">失败 {entry.failed}</span>
                         ) : null}
                       </td>
-                      <td className="creation-history-time">{formatTime(entry.created_at)}</td>
-                      <td className="creation-history-alias-cell">
+                      <td className="creation-history-time" data-label="时间">
+                        {formatTime(entry.created_at)}
+                      </td>
+                      <td className="creation-history-alias-cell" data-label="别名">
                         {entry.aliases.length > 0 ? (
                           <button
                             className="creation-history-alias-toggle"

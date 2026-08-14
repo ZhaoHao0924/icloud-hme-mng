@@ -298,7 +298,7 @@ test("inbox keeps excess messages inside a fixed scrolling pane", async ({ page 
     const message = document.querySelector<HTMLElement>(".inbox-message-panel");
     const panel = document.querySelector<HTMLElement>(".inbox-preview-panel");
     const copy = panel?.querySelector<HTMLElement>(".inbox-preview-copy");
-    const body = copy?.querySelector<HTMLElement>("p");
+    const body = copy?.querySelector<HTMLElement>(".inbox-plain-body");
     const panelRect = panel?.getBoundingClientRect();
     const copyRect = copy?.getBoundingClientRect();
     return {
@@ -338,8 +338,9 @@ test("inbox keeps excess messages inside a fixed scrolling pane", async ({ page 
   expect(Math.abs(sidebarTopAfterScroll)).toBeLessThanOrEqual(1);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(sidebar).toHaveCSS("position", "static");
+  await expect(sidebar).toHaveCSS("position", "sticky");
   await expect(messageList).toBeVisible();
+  await expect(previewPanel).toHaveCount(0);
   const dimensions = await page.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
     viewportWidth: window.innerWidth,
@@ -355,7 +356,7 @@ test("inbox long content fits each responsive layout without horizontal overflow
 
   const messageItem = page.locator(".inbox-message-item");
   const previewPanel = page.locator(".inbox-preview-panel");
-  const previewCopy = previewPanel.locator(".inbox-preview-copy p");
+  const previewCopy = previewPanel.locator(".inbox-plain-body");
   await expect(messageItem).toHaveCount(1);
   await expect(previewPanel).toBeVisible();
   await expect(messageItem).toContainText("LongSender-");
@@ -372,10 +373,17 @@ test("inbox long content fits each responsive layout without horizontal overflow
     { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
+    if (viewport.width <= 760) {
+      await expect(messageItem).toBeVisible();
+      await expect(previewPanel).toHaveCount(0);
+      await page.getByRole("button", { name: /选择邮件 LongSubject-/ }).click();
+      await expect(previewPanel).toBeVisible();
+      await expect(previewCopy).toContainText("Preview line 18");
+    }
     const dimensions = await page.evaluate(() => {
       const message = document.querySelector<HTMLElement>(".inbox-message-item");
       const preview = document.querySelector<HTMLElement>(".inbox-preview-panel");
-      const previewCopy = document.querySelector<HTMLElement>(".inbox-preview-copy p");
+      const previewCopy = document.querySelector<HTMLElement>(".inbox-plain-body");
       return {
         documentWidth: document.documentElement.scrollWidth,
         messageScrollWidth: message?.scrollWidth ?? 0,
@@ -389,12 +397,50 @@ test("inbox long content fits each responsive layout without horizontal overflow
     });
 
     expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
-    expect(dimensions.messageScrollWidth).toBeLessThanOrEqual(dimensions.messageWidth);
+    if (viewport.width > 760) {
+      expect(dimensions.messageScrollWidth).toBeLessThanOrEqual(dimensions.messageWidth);
+    }
     expect(dimensions.previewScrollWidth).toBeLessThanOrEqual(dimensions.previewWidth);
     expect(dimensions.previewCopyScrollHeight).toBeGreaterThan(dimensions.previewCopyHeight);
-    await expect(messageItem).toBeVisible();
+    if (viewport.width > 760) await expect(messageItem).toBeVisible();
     await expect(previewPanel).toBeVisible();
   }
+});
+
+test("mobile inbox opens one message detail and returns to the list", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/accounts/acc_primary/inbox?mock=success");
+  await waitForMockWorker(page, "收件箱");
+
+  await expect(page.getByRole("list", { name: "邮件摘要列表" })).toBeVisible();
+  await expect(page.locator(".inbox-preview-panel")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "选择邮件 新设备登录提醒" }).click();
+  await expect(page.getByRole("list", { name: "邮件摘要列表" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "新设备登录提醒" })).toBeVisible();
+
+  await page.getByRole("button", { name: "返回邮件列表" }).click();
+  await expect(page.getByRole("list", { name: "邮件摘要列表" })).toBeVisible();
+  await expect(page.locator(".inbox-preview-panel")).toHaveCount(0);
+});
+
+test("HTML email styles and links render inside a script-isolated frame", async ({ page }) => {
+  await page.goto("/accounts/acc_primary/inbox?mock=inbox-html");
+  await waitForMockWorker(page, "收件箱");
+
+  const frameElement = page.getByTitle("邮件正文：登录确认");
+  await expect(frameElement).toBeVisible();
+  await expect(frameElement).toHaveAttribute(
+    "sandbox",
+    "allow-popups allow-popups-to-escape-sandbox",
+  );
+
+  const bodyFrame = page.frameLocator('iframe[title="邮件正文：登录确认"]');
+  const link = bodyFrame.getByRole("link", { name: "打开链接" });
+  await expect(link).toHaveAttribute("href", "https://example.test/continue");
+  await expect(link).toHaveAttribute("target", "_blank");
+  await expect(link).toHaveCSS("background-color", "rgb(20, 99, 210)");
+  await expect(bodyFrame.locator("script")).toHaveCount(0);
 });
 
 test("inbox keeps its filters visible for Apple fallback errors and gateway timeouts", async ({
@@ -1292,5 +1338,17 @@ test("alias automation saves rules, creates aliases, and fits responsive baselin
     await expect(page.getByLabel("周一")).toBeVisible();
     await expect(page.getByLabel("开始")).toBeVisible();
     await expect(page.getByRole("button", { name: "批量创建" })).toBeVisible();
+    if (viewport.width <= 760) {
+      const historyGeometry = await page
+        .locator(".creation-history-table-wrap")
+        .evaluate((element) => ({
+          clientWidth: element.clientWidth,
+          overflowX: getComputedStyle(element).overflowX,
+          scrollWidth: element.scrollWidth,
+        }));
+      expect(historyGeometry.scrollWidth).toBeLessThanOrEqual(historyGeometry.clientWidth);
+      expect(historyGeometry.overflowX).toBe("visible");
+      await expect(page.locator(".creation-history-row").first()).toHaveCSS("display", "grid");
+    }
   }
 });

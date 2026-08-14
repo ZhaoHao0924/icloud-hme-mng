@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +64,34 @@ func TestInboxPreviewCacheStoresEmptyPreviewAndUpdatesInPlace(t *testing.T) {
 	message, ok := cache.Get("acc", "1")
 	if !ok || message.Preview != "loaded" {
 		t.Fatalf("updated cache entry = (%+v, %v), want loaded preview", message, ok)
+	}
+}
+
+func TestInboxPreviewCacheKeepsFullBodyWhenPreviewIsUpdated(t *testing.T) {
+	cache := newInboxPreviewCache()
+	cache.SetFull("acc", mail.FullMessage{
+		Message:     mail.Message{ID: "1", Preview: "initial"},
+		Body:        `<a href="https://example.test">Open</a>`,
+		ContentType: "text/html",
+	})
+	cache.Set("acc", mail.Message{ID: "1", Preview: "updated"})
+
+	full, ok := cache.GetFull("acc", "1")
+	if !ok {
+		t.Fatal("full message was lost after preview update")
+	}
+	if full.Preview != "updated" || full.ContentType != "text/html" || !strings.Contains(full.Body, "example.test") {
+		t.Fatalf("full message = %+v", full)
+	}
+}
+
+func TestInboxPreviewCacheSkipsOversizedFullBodies(t *testing.T) {
+	cache := newInboxPreviewCache()
+	cache.SetFull("acc", mail.FullMessage{
+		Message: mail.Message{ID: "1"},
+		Body:    strings.Repeat("x", maxInboxFullMessageCacheBody+1),
+	})
+	if _, ok := cache.GetFull("acc", "1"); ok {
+		t.Fatal("oversized full body was cached")
 	}
 }

@@ -396,6 +396,40 @@ func TestReadBodyPrefersDecodedPlainTextFromMultipartAlternative(t *testing.T) {
 	}
 }
 
+func TestReadRenderableBodyPreservesHTMLAndBuildsSafePreview(t *testing.T) {
+	raw := "Content-Type: multipart/alternative; boundary=mail-boundary\r\n" +
+		"\r\n" +
+		"--mail-boundary\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"Open the account page\r\n" +
+		"--mail-boundary\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n" +
+		"\r\n" +
+		`<style>.action { color: red; }</style><a class="action" href="https://example.test/account">Open</a>` + "\r\n" +
+		"--mail-boundary--\r\n"
+	message, err := mail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, contentType, preview, err := readRenderableBody(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "text/html" {
+		t.Fatalf("content type = %q, want text/html", contentType)
+	}
+	for _, expected := range []string{"<style>", "https://example.test/account"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("body = %q, want %q", body, expected)
+		}
+	}
+	if preview != "Open the account page" {
+		t.Fatalf("preview = %q, want plain-text alternative", preview)
+	}
+}
+
 func containsFetchItem(items []imap.FetchItem, want string) bool {
 	for _, item := range items {
 		if string(item) == want {

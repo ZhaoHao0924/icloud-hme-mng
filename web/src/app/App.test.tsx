@@ -37,6 +37,31 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "账户" })).toHaveAttribute("href", "/accounts");
   });
 
+  it("expands and collapses the mobile primary menu", async () => {
+    const user = userEvent.setup();
+    renderAccounts();
+    await screen.findByRole("table", { name: "账户列表" });
+
+    const menuButton = screen.getByRole("button", { name: "展开主菜单" });
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    expect(menuButton).toHaveAttribute("aria-expanded", "false");
+    expect(navigation).not.toHaveClass("primary-nav-open");
+
+    await user.click(menuButton);
+    expect(screen.getByRole("button", { name: "收起主菜单" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(navigation).toHaveClass("primary-nav-open");
+
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "展开主菜单" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(navigation).not.toHaveClass("primary-nav-open");
+  });
+
   it("renders an accessible empty account state", async () => {
     mockScenario.set("empty");
     renderAccounts();
