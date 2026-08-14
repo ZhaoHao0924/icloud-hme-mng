@@ -188,7 +188,7 @@ function buildEmailHtmlDocument(rawHtml: string) {
       min-width: 0 !important;
       height: auto !important;
       min-height: 0 !important;
-      margin: 0;
+      margin: 0 !important;
       padding: 0;
       overflow-x: hidden !important;
       overflow-wrap: anywhere;
@@ -221,11 +221,31 @@ function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
     }
   }, []);
 
-  const syncFrameHeight = useCallback(() => {
+  const syncFrameLayout = useCallback(() => {
+    const frame = frameRef.current;
     const frameDocument = readFrameDocument();
-    if (!frameDocument) return;
+    const frameBody = frameDocument?.body;
+    const documentElement = frameDocument?.documentElement;
+    if (!frame || !frameDocument || !frameBody || !documentElement) return;
 
-    const measuredHeight = [frameDocument.documentElement, frameDocument.body]
+    frameBody.style.transform = "none";
+    const bodyRect = frameBody.getBoundingClientRect();
+    const viewportWidth = Math.max(frame.clientWidth, documentElement.clientWidth);
+    const widestContent = Array.from(frameBody.querySelectorAll("*")).reduce(
+      (width, element) => {
+        const rect = element.getBoundingClientRect();
+        return Math.max(width, rect.right - bodyRect.left, bodyRect.right - rect.left);
+      },
+      Math.max(documentElement.scrollWidth, frameBody.scrollWidth, bodyRect.width),
+    );
+    const scale =
+      viewportWidth > 0 && widestContent > viewportWidth
+        ? Math.min(1, viewportWidth / widestContent)
+        : 1;
+    frameBody.style.transformOrigin = "top left";
+    frameBody.style.transform = scale < 1 ? `scale(${scale})` : "";
+
+    const measuredHeight = [documentElement, frameBody]
       .filter((element): element is HTMLElement => element !== null)
       .reduce(
         (height, element) =>
@@ -237,25 +257,26 @@ function EmailHtmlFrame({ body, title }: { body: string; title: string }) {
           ),
         0,
       );
-    if (measuredHeight <= 0) return;
+    const scaledHeight = Math.ceil(measuredHeight * scale);
+    if (scaledHeight <= 0) return;
     setFrameHeight((currentHeight) =>
-      currentHeight === measuredHeight ? currentHeight : measuredHeight,
+      currentHeight === scaledHeight ? currentHeight : scaledHeight,
     );
   }, [readFrameDocument]);
 
   const handleFrameLoad = useCallback(() => {
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
-    syncFrameHeight();
+    syncFrameLayout();
 
     const frameDocument = readFrameDocument();
     if (!frameDocument || typeof ResizeObserver === "undefined") return;
 
-    const observer = new ResizeObserver(syncFrameHeight);
+    const observer = new ResizeObserver(syncFrameLayout);
     observer.observe(frameDocument.documentElement);
     if (frameDocument.body) observer.observe(frameDocument.body);
     resizeObserverRef.current = observer;
-  }, [readFrameDocument, syncFrameHeight]);
+  }, [readFrameDocument, syncFrameLayout]);
 
   useEffect(() => {
     resizeObserverRef.current?.disconnect();

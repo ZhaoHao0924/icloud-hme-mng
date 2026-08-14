@@ -446,16 +446,18 @@ test("HTML email styles and links render inside a script-isolated frame", async 
     const frame = element as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
     return {
-      documentHeight: frameDocument?.documentElement.scrollHeight ?? 0,
+      bodyHeight: frameDocument?.body?.getBoundingClientRect().height ?? 0,
       documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
       frameHeight: frame.getBoundingClientRect().height,
       frameWidth: frame.clientWidth,
+      scale: frameDocument?.body?.style.transform ?? "",
       viewportWidth: window.innerWidth,
     };
   });
-  expect(frameMetrics.documentHeight).toBeGreaterThan(0);
+  expect(frameMetrics.bodyHeight).toBeGreaterThan(0);
   expect(frameMetrics.documentWidth).toBeLessThanOrEqual(frameMetrics.frameWidth);
-  expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.documentHeight - 2);
+  expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.bodyHeight - 2);
+  expect(frameMetrics.scale).toContain("scale(");
   expect(frameMetrics.frameWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth);
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -467,18 +469,18 @@ test("HTML email styles and links render inside a script-isolated frame", async 
     const frame = element as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
     return {
-      documentHeight: frameDocument?.documentElement.scrollHeight ?? 0,
+      bodyHeight: frameDocument?.body?.getBoundingClientRect().height ?? 0,
       documentWidth: frameDocument?.documentElement.scrollWidth ?? 0,
       frameHeight: frame.getBoundingClientRect().height,
       frameWidth: frame.clientWidth,
+      scale: frameDocument?.body?.style.transform ?? "",
       viewportWidth: window.innerWidth,
     };
   });
-  expect(mobileFrameMetrics.documentHeight).toBeGreaterThan(0);
+  expect(mobileFrameMetrics.bodyHeight).toBeGreaterThan(0);
   expect(mobileFrameMetrics.documentWidth).toBeLessThanOrEqual(mobileFrameMetrics.frameWidth);
-  expect(mobileFrameMetrics.frameHeight).toBeGreaterThanOrEqual(
-    mobileFrameMetrics.documentHeight - 2,
-  );
+  expect(mobileFrameMetrics.frameHeight).toBeGreaterThanOrEqual(mobileFrameMetrics.bodyHeight - 2);
+  expect(mobileFrameMetrics.scale).toContain("scale(");
   expect(mobileFrameMetrics.frameWidth).toBeLessThanOrEqual(mobileFrameMetrics.viewportWidth);
 });
 
