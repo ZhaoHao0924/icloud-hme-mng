@@ -101,16 +101,19 @@ func TestQA009AuditContractClassifiesAndRedactsUpstreamFailures(t *testing.T) {
 		name          string
 		err           error
 		wantErrorCode string
+		wantStatus    int
 	}{
 		{
 			name:          "apple upstream rejection",
 			err:           errors.New(upstreamSecret),
 			wantErrorCode: auditlog.ErrorCodeUpstreamRejected,
+			wantStatus:    http.StatusBadGateway,
 		},
 		{
 			name:          "apple upstream timeout",
 			err:           fmt.Errorf("%s: %w", upstreamSecret, context.DeadlineExceeded),
 			wantErrorCode: auditlog.ErrorCodeUpstreamTimeout,
+			wantStatus:    http.StatusGatewayTimeout,
 		},
 	}
 
@@ -125,8 +128,8 @@ func TestQA009AuditContractClassifiesAndRedactsUpstreamFailures(t *testing.T) {
 
 			srv.Handler().ServeHTTP(res, req)
 
-			if res.Code != http.StatusBadGateway {
-				t.Fatalf("inbox message status = %d, want %d", res.Code, http.StatusBadGateway)
+			if res.Code != tt.wantStatus {
+				t.Fatalf("inbox message status = %d, want %d", res.Code, tt.wantStatus)
 			}
 			entry := qa009OnlyAuditEntry(t, srv)
 			if entry.OperationType != "inbox_messages_id" || entry.ErrorCode != tt.wantErrorCode || entry.Level != auditlog.LevelError {

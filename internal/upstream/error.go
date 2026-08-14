@@ -13,16 +13,16 @@ import (
 type Kind string
 
 const (
-	KindSessionExpired       Kind = "session_expired"
-	KindEntitlementRequired  Kind = "entitlement_required"
-	KindAliasLimitReached    Kind = "alias_limit_reached"
-	KindAliasDailyLimit      Kind = "alias_daily_limit_reached"
-	KindRateLimited          Kind = "rate_limited"
-	KindDeviceTrustRequired  Kind = "device_trust_required"
-	KindValidationFailed     Kind = "validation_failed"
-	KindStateConflict        Kind = "state_conflict"
-	KindServiceUnavailable   Kind = "service_unavailable"
-	KindUnknownRejected      Kind = "unknown_rejected"
+	KindSessionExpired      Kind = "session_expired"
+	KindEntitlementRequired Kind = "entitlement_required"
+	KindAliasLimitReached   Kind = "alias_limit_reached"
+	KindAliasDailyLimit     Kind = "alias_daily_limit_reached"
+	KindRateLimited         Kind = "rate_limited"
+	KindDeviceTrustRequired Kind = "device_trust_required"
+	KindValidationFailed    Kind = "validation_failed"
+	KindStateConflict       Kind = "state_conflict"
+	KindServiceUnavailable  Kind = "service_unavailable"
+	KindUnknownRejected     Kind = "unknown_rejected"
 )
 
 // Error carries only safe metadata. The source response body is deliberately

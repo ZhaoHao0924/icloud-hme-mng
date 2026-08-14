@@ -384,8 +384,8 @@ func isRetryableUpstreamError(err error) bool {
 	return errors.As(err, &classified) && classified.Retryable
 }
 
-func classifySuccessfulResponseFailure(body []byte) error {
-	return upstream.ClassifyResponse(200, body)
+func classifySuccessfulResponseFailure(body string) error {
+	return upstream.ClassifyResponse(200, []byte(body))
 }
 
 func (c *Client) sleepRetry(attempt int) {
@@ -681,7 +681,7 @@ func (c *Client) Delete(anonymousID string) error {
 			return err
 		}
 		if !gjson.Get(body, "success").Bool() {
-			return fmt.Errorf("删除别名失败: %w", classifySuccessfulResponseFailure([]byte(body)))
+			return fmt.Errorf("删除别名失败: %w", classifySuccessfulResponseFailure(body))
 		}
 	}
 	c.log("已删除")

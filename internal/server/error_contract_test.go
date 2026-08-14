@@ -10,11 +10,11 @@ import (
 
 func TestClassifyAPIErrorMatrix(t *testing.T) {
 	tests := []struct {
-		name      string
-		err       error
-		wantCode  string
+		name       string
+		err        error
+		wantCode   string
 		wantStatus int
-		retryable bool
+		retryable  bool
 	}{
 		{name: "session", err: upstream.ClassifyResponse(401, nil), wantCode: apiErrorSessionExpired, wantStatus: 401},
 		{name: "generic 403", err: upstream.ClassifyResponse(403, nil), wantCode: apiErrorUpstreamRejected, wantStatus: 502},
