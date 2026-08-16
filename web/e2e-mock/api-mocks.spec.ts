@@ -1317,6 +1317,14 @@ test("settings reports health and reloads configuration", async ({ page }) => {
   const operationLogList = page.getByRole("list", { name: "最近操作记录" });
   await expect(operationLogList).toContainText("读取收件箱");
   await expect(page.getByRole("button", { name: "刷新日志" })).toBeVisible();
+  const cookieLogEntry = operationLogList.getByRole("listitem").filter({ hasText: "更新 Cookie" });
+  await cookieLogEntry.getByText("查看请求参数原值与原始响应").click();
+  await expect(cookieLogEntry.getByRole("region", { name: "请求参数原值" })).toContainText(
+    '{"cookies":"session=demo-cookie"}',
+  );
+  await expect(cookieLogEntry.getByRole("region", { name: "原始响应" })).toContainText(
+    '{"success":false,"message":"Cookie 已失效"}',
+  );
   const healthList = page.locator(".settings-health-list");
   const configLocation = healthList.locator(".settings-health-item").last();
 

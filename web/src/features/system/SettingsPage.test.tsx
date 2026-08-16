@@ -1,5 +1,5 @@
 import { HttpResponse, http } from "msw";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { describe, expect, it } from "vitest";
@@ -86,6 +86,27 @@ describe("SettingsPage", () => {
 
     await waitFor(() => expect(logRequests).toBeGreaterThanOrEqual(2));
     expect(refreshButton).toBeEnabled();
+  });
+
+  it("expands complete request parameters and the original response", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    const operation = await screen.findByText("更新 Cookie");
+    const logEntry = operation.closest("li");
+    expect(logEntry).not.toBeNull();
+    const entry = within(logEntry as HTMLElement);
+    await user.click(entry.getByText("查看请求参数原值与原始响应"));
+
+    const requestDetails = entry.getByRole("region", { name: "请求参数原值" });
+    expect(requestDetails).toHaveTextContent("PUT");
+    expect(requestDetails).toHaveTextContent("/api/accounts/demo-account/cookies");
+    expect(requestDetails).toHaveTextContent("id=demo-account");
+    expect(requestDetails).toHaveTextContent('{"cookies":"session=demo-cookie"}');
+
+    const responseDetails = entry.getByRole("region", { name: "原始响应" });
+    expect(within(responseDetails).getByText("失败")).toBeInTheDocument();
+    expect(responseDetails).toHaveTextContent('{"success":false,"message":"Cookie 已失效"}');
   });
 
   it("saves webhook settings, clears the secret input, and sends a test delivery", async () => {

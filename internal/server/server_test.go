@@ -389,7 +389,7 @@ func TestAPIResponsesDisableBrowserCaching(t *testing.T) {
 	}
 }
 
-func TestOperationLogsAreAvailableAndDoNotPersistRequestValues(t *testing.T) {
+func TestOperationLogsAreAvailableAndPersistRequestValues(t *testing.T) {
 	srv := newTestServer(t, "")
 	const accountID = "account-private-value"
 	const alias = "private-alias@example.test"
@@ -419,8 +419,11 @@ func TestOperationLogsAreAvailableAndDoNotPersistRequestValues(t *testing.T) {
 	if entry.SchemaVersion != auditlog.SchemaVersion || entry.RequestID == "" || entry.OperationType != "inbox" || entry.ErrorCode != auditlog.ErrorCodeValidationFailed {
 		t.Errorf("operation log audit contract = %+v", entry)
 	}
-	if entry.Request.Source != auditlog.RequestSourceAPI || entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || entry.Request.PaginationRequested || entry.Response.Success {
+	if entry.Request.Source != auditlog.RequestSourceAPI || entry.Request.Method != http.MethodGet || entry.Request.Path != "/api/inbox" || entry.Request.RawQuery != "account_id="+accountID+"&alias="+alias || len(entry.Request.PathParams) != 0 || entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || entry.Request.PaginationRequested || entry.Response.Success {
 		t.Errorf("operation log snapshots = request:%+v response:%+v", entry.Request, entry.Response)
+	}
+	if entry.Response.Body.Encoding != auditlog.PayloadEncodingUTF8 || entry.Response.Body.Value != res.Body.String() {
+		t.Errorf("operation log response body = %+v", entry.Response.Body)
 	}
 
 	logsReq := httptest.NewRequest(http.MethodGet, "/api/logs?limit=10", nil)
@@ -429,8 +432,8 @@ func TestOperationLogsAreAvailableAndDoNotPersistRequestValues(t *testing.T) {
 	if logsRes.Code != http.StatusOK {
 		t.Fatalf("logs status = %d, want %d; body = %s", logsRes.Code, http.StatusOK, logsRes.Body.String())
 	}
-	if strings.Contains(logsRes.Body.String(), accountID) || strings.Contains(logsRes.Body.String(), alias) {
-		t.Errorf("logs response contains request value: %s", logsRes.Body.String())
+	if !strings.Contains(logsRes.Body.String(), accountID) || !strings.Contains(logsRes.Body.String(), alias) {
+		t.Errorf("logs response does not contain request values: %s", logsRes.Body.String())
 	}
 	entriesAfterRead, err := srv.operationLogs.List(10)
 	if err != nil {

@@ -1,6 +1,8 @@
 package auditlog
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -129,30 +131,43 @@ func TestRecordNormalizesUnsafeValues(t *testing.T) {
 	}
 }
 
-func TestRecordUsesOnlyAllowlistedAuditValues(t *testing.T) {
+func TestRecordNormalizesMetadataAndPersistsRawPayloads(t *testing.T) {
 	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
 	store, err := newStore(t.TempDir(), func() time.Time { return now }, false)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 
-	const sensitiveValue = "cookie=qa009-private-value"
+	const (
+		rejectedMetadata = "not-an-allowlisted-value"
+		requestValue     = `{"cookie":"qa009-private-value"}`
+		responseValue    = `{"success":false,"message":"qa009-original-response"}`
+	)
 	entry, err := store.Record(RecordInput{
-		RequestID:     sensitiveValue,
+		RequestID:     rejectedMetadata,
 		Level:         LevelError,
 		Operation:     "Audit contract probe",
-		OperationType: sensitiveValue,
+		OperationType: rejectedMetadata,
 		Status:        502,
-		ErrorCode:     sensitiveValue,
+		ErrorCode:     rejectedMetadata,
 		Duration:      20 * time.Millisecond,
 		RetryCount:    120,
 		Request: RequestSnapshot{
-			Source:              sensitiveValue,
+			Source:              rejectedMetadata,
+			Method:              "POST",
+			Path:                "/api/accounts/private-account/cookies",
+			RawQuery:            "replace=true",
+			PathParams:          map[string]string{"id": "private-account"},
 			BodyPresent:         true,
 			AliasFilterApplied:  true,
 			PaginationRequested: true,
+			Body:                NewPayloadSnapshot("application/json", []byte(requestValue)),
 		},
-		Response: ResponseSnapshot{CreatedCount: -1, FailedCount: -1},
+		Response: ResponseSnapshot{
+			CreatedCount: -1,
+			FailedCount:  -1,
+			Body:         NewPayloadSnapshot("application/json", []byte(responseValue)),
+		},
 	})
 	if err != nil {
 		t.Fatalf("record: %v", err)
@@ -163,10 +178,13 @@ func TestRecordUsesOnlyAllowlistedAuditValues(t *testing.T) {
 	if entry.OperationType != OperationTypeUnspecified || entry.ErrorCode != "" || entry.RetryCount != 99 {
 		t.Errorf("entry contract normalization = %+v", entry)
 	}
-	if entry.Request.Source != RequestSourceAPI || !entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || !entry.Request.PaginationRequested {
+	if entry.Request.Source != RequestSourceAPI || entry.Request.Method != "POST" || entry.Request.PathParams["id"] != "private-account" || !entry.Request.BodyPresent || !entry.Request.AliasFilterApplied || !entry.Request.PaginationRequested {
 		t.Errorf("request snapshot = %+v", entry.Request)
 	}
-	if entry.Response.Success || entry.Response.CreatedCount != 0 || entry.Response.FailedCount != 0 {
+	if entry.Request.Body.Value != requestValue || entry.Request.Body.Encoding != PayloadEncodingUTF8 {
+		t.Errorf("request payload = %+v", entry.Request.Body)
+	}
+	if entry.Response.Success || entry.Response.CreatedCount != 0 || entry.Response.FailedCount != 0 || entry.Response.Body.Value != responseValue {
 		t.Errorf("response snapshot = %+v", entry.Response)
 	}
 
@@ -174,8 +192,57 @@ func TestRecordUsesOnlyAllowlistedAuditValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read persisted entry: %v", err)
 	}
-	if strings.Contains(string(raw), sensitiveValue) {
-		t.Fatal("sensitive audit input was persisted")
+	if strings.Contains(string(raw), rejectedMetadata) {
+		t.Fatal("untrusted audit metadata was persisted")
+	}
+	if !strings.Contains(string(raw), "qa009-private-value") || !strings.Contains(string(raw), "qa009-original-response") {
+		t.Fatal("raw request or response payload was not persisted")
+	}
+}
+
+func TestNewPayloadSnapshotPreservesUTF8AndBinary(t *testing.T) {
+	textBody := []byte(`{"message":"完整响应"}`)
+	textPayload := NewPayloadSnapshot(" application/json; charset=utf-8 ", textBody)
+	if !textPayload.Present || textPayload.ContentType != "application/json; charset=utf-8" || textPayload.Encoding != PayloadEncodingUTF8 || textPayload.Value != string(textBody) {
+		t.Errorf("UTF-8 payload = %+v", textPayload)
+	}
+
+	binaryBody := []byte{0xff, 0x00, 0x01, 0xfe}
+	binaryPayload := NewPayloadSnapshot("application/octet-stream", binaryBody)
+	if !binaryPayload.Present || binaryPayload.Encoding != PayloadEncodingBase64 {
+		t.Fatalf("binary payload = %+v", binaryPayload)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(binaryPayload.Value)
+	if err != nil {
+		t.Fatalf("decode binary payload: %v", err)
+	}
+	if !bytes.Equal(decoded, binaryBody) {
+		t.Errorf("decoded binary payload = %v, want %v", decoded, binaryBody)
+	}
+}
+
+func TestStoreReadsPayloadLargerThanLegacyScannerLimit(t *testing.T) {
+	store, err := newStore(t.TempDir(), time.Now, false)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	largeBody := strings.Repeat("raw-response-", 32*1024)
+	if _, err := store.Record(RecordInput{
+		Operation: "Large response",
+		Status:    200,
+		Response: ResponseSnapshot{
+			Body: NewPayloadSnapshot("text/plain", []byte(largeBody)),
+		},
+	}); err != nil {
+		t.Fatalf("record large response: %v", err)
+	}
+
+	entries, err := store.List(1)
+	if err != nil {
+		t.Fatalf("list large response: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Response.Body.Value != largeBody {
+		t.Fatalf("large response was not read back intact")
 	}
 }
 
@@ -248,5 +315,33 @@ func TestListKeepsLegacyAuditEntriesReadable(t *testing.T) {
 	}
 	if entry.Request.Source != RequestSourceLegacy || !entry.Response.Success {
 		t.Errorf("legacy entry snapshots = request:%+v response:%+v", entry.Request, entry.Response)
+	}
+}
+
+func TestListKeepsSchemaVersionTwoEntriesReadable(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	store, err := newStore(t.TempDir(), func() time.Time { return now }, false)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	const requestID = "0123456789abcdef0123456789abcdef"
+	const raw = `{"schema_version":2,"timestamp":"2026-08-10T12:00:00Z","request_id":"0123456789abcdef0123456789abcdef","level":"info","operation":"Version two operation","operation_type":"inbox","status":200,"duration_ms":10,"retry_count":0,"request":{"source":"api","body_present":false,"alias_filter_applied":true,"pagination_requested":true},"response":{"success":true}}` + "\n"
+	if err := os.WriteFile(store.filePath(now), []byte(raw), 0600); err != nil {
+		t.Fatalf("write version two entry: %v", err)
+	}
+
+	entries, err := store.List(1)
+	if err != nil {
+		t.Fatalf("list version two entry: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("version two entry count = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.SchemaVersion != 2 || entry.RequestID != requestID || entry.OperationType != "inbox" {
+		t.Errorf("version two entry contract = %+v", entry)
+	}
+	if entry.Request.Source != RequestSourceAPI || !entry.Request.AliasFilterApplied || !entry.Request.PaginationRequested || entry.Request.PathParams == nil || !entry.Response.Success {
+		t.Errorf("version two snapshots = request:%+v response:%+v", entry.Request, entry.Response)
 	}
 }

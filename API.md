@@ -24,8 +24,10 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-`code`、`retryable` 和 `action` 是跨页面稳定字段。客户端不得根据单独的 HTTP
-`401`/`403` 推断 Cookie 失效，也不得展示 Apple 原始响应体、Cookie、Token 或未验证的归因。
+`code`、`retryable` 和 `action` 是跨页面稳定字段。常规业务页面不得根据单独的 HTTP
+`401`/`403` 推断 Cookie 失效，也不得在错误提示中展示 Apple 内部上游原始响应体、Cookie、
+Token 或未验证的归因。系统设置中的操作日志详情是明确例外，按第 16 节展示已持久化的请求参数
+原值和管理端原始响应，但不会额外捕获 Apple 内部上游响应或请求/响应 header。
 
 ### ERR-001 错误矩阵
 
@@ -868,17 +870,24 @@ GET /api/accounts/:id/alias-creation-history.csv
 GET /api/logs?limit=200
 ```
 
-新写入的审计记录使用 `schema_version: 2`，并包含服务端生成的 `request_id`、稳定的
-`operation_type`、HTTP 状态、允许的 `error_code`、耗时和 `retry_count`。`request` 仅包含
-来源、是否有请求体、是否应用别名筛选和是否请求分页等固定布尔摘要；`response` 仅包含成功状态
-以及安全的创建/失败计数。客户端传入的 `X-Request-ID` 不会回显或持久化，服务端总是生成新的
-不透明关联 ID。旧版日志在读取时以 `schema_version: 1` 和 `operation_type: legacy` 兼容返回。
+新写入的审计记录使用 `schema_version: 3`，并包含服务端生成的 `request_id`、稳定的
+`operation_type`、HTTP 状态、允许的 `error_code`、耗时和 `retry_count`。`request` 会保存来源、
+HTTP 方法、实际路径、原始 query 字符串、路径参数、是否有请求体、别名筛选/分页标记，以及
+`body` 原文快照；`response` 会保存成功状态、创建/失败计数和管理端实际返回的 `body` 原文快照。
+快照格式为 `{ "present": true, "content_type": "...", "encoding": "utf8|base64", "value": "..." }`。
+有效 UTF-8 直接保存，二进制内容保存为标准 Base64；响应原文按返回给本管理 API 调用方的字节记录，
+不等同于 Apple 内部上游 HTTP 响应。客户端传入的 `X-Request-ID` 不会回显或持久化，服务端总是生成
+新的不透明关联 ID。
 
-审计字段按白名单持久化，不保存请求体、query 值、header、Cookie、Apple ID 密码、App Password、
-API Token、OTP、代理认证、完整别名地址、邮件正文或上游原始响应体。`error_code` 仅使用固定的
-脱敏业务代码，例如 `validation_failed`、`upstream_rejected` 和 `upstream_timeout`。
+这是个人使用的管理端，操作日志按可追溯性优先：请求参数原值（包括账户 ID、别名地址、Cookie、
+App Password、Apple ID 密码、通知授权码、Webhook secret、邮件正文等请求体内容）和管理端原始
+响应会写入本地日志文件。请求/响应 header 不写入，因此 Bearer Token、平台会话 Cookie 和其他
+header 凭据不会因日志捕获而重复保存。`/api/logs` 本身不会递归写入日志；API 请求体仍受 1 MiB
+限制，超过限制的请求按原有 `413` 契约处理。旧版 `schema_version: 1` 日志仍以
+`operation_type: legacy` 返回，`schema_version: 2` 日志保留原操作类型和请求 ID，并为新增快照字段
+补空值。
 
-返回最近的隐私安全操作日志，`limit` 范围为 `1..500`，默认 `200`。日志按时间倒序，保存最近 7 天；过期记录会在服务启动、写入和每小时清理时自动删除。每条记录只包含定义的审计元数据与白名单摘要，不包含账户 ID、邮件地址、Cookie、App Password、请求参数原值、邮件正文或 Apple 原始响应。定时别名自动化在每次运行状态持久化后也会写入 `定时执行别名自动化` 记录。
+返回最近的操作日志，`limit` 范围为 `1..500`，默认 `200`。日志按时间倒序，保存最近 7 天；过期记录会在服务启动、写入和每小时清理时自动删除。日志目录包含原始参数和响应，必须按密钥材料保护，不能暴露给无关用户或提交到 Git。定时别名自动化在每次运行状态持久化后也会写入 `定时执行别名自动化` 记录；该类非 HTTP 记录没有请求路径或响应体。
 
 ---
 
@@ -1076,7 +1085,7 @@ for alias in resp.json()["data"]["aliases"]:
 }
 ```
 
-授权码为空时保留已保存的授权码，便于修改开关或收件地址。服务将配置保存到数据目录下的 `email-notification.json`，文件权限为 `0600`；接口响应、操作日志和通知正文都不会包含授权码、Cookie、密码、别名地址或邮件正文。
+授权码为空时保留已保存的授权码，便于修改开关或收件地址。服务将配置保存到数据目录下的 `email-notification.json`，文件权限为 `0600`；接口响应和通知正文不会返回授权码、Cookie 或密码，但提交 `authorization_code` 的 PUT 请求体会按操作日志策略原样保存，因此日志可能包含授权码和其他请求字段。
 
 ### 发送测试邮件
 
@@ -1116,7 +1125,7 @@ The response never returns the signing secret:
 }
 ```
 
-An empty `secret` keeps the saved secret. The configuration is stored in `webhook-notification.json` with `0600` permissions; the secret is never included in API responses, operation logs, or event payloads.
+An empty `secret` keeps the saved secret. The configuration is stored in `webhook-notification.json` with `0600` permissions; the secret is never included in API responses or event payloads, but a submitted PUT request body is retained in the local operation log by design.
 
 ### Send a Test Webhook
 

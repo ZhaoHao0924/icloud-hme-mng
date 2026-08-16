@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -20,6 +22,40 @@ type operationLogData struct {
 	Count         int              `json:"count"`
 	Entries       []auditlog.Entry `json:"entries"`
 	RetentionDays int              `json:"retention_days"`
+}
+
+type operationLogRequestBodyCapture struct {
+	io.ReadCloser
+	body bytes.Buffer
+}
+
+func (capture *operationLogRequestBodyCapture) Read(target []byte) (int, error) {
+	read, err := capture.ReadCloser.Read(target)
+	if read > 0 {
+		_, _ = capture.body.Write(target[:read])
+	}
+	return read, err
+}
+
+type operationLogResponseWriter struct {
+	gin.ResponseWriter
+	body bytes.Buffer
+}
+
+func (writer *operationLogResponseWriter) Write(data []byte) (int, error) {
+	written, err := writer.ResponseWriter.Write(data)
+	if written > 0 {
+		_, _ = writer.body.Write(data[:written])
+	}
+	return written, err
+}
+
+func (writer *operationLogResponseWriter) WriteString(value string) (int, error) {
+	written, err := writer.ResponseWriter.WriteString(value)
+	if written > 0 {
+		_, _ = writer.body.WriteString(value[:written])
+	}
+	return written, err
 }
 
 func (s *Server) listOperationLogs(c *gin.Context) {
@@ -50,8 +86,24 @@ func (s *Server) listOperationLogs(c *gin.Context) {
 }
 
 func (s *Server) operationLogMiddleware(c *gin.Context) {
+	if !strings.HasPrefix(c.Request.URL.Path, "/api/") || c.Request.URL.Path == "/api/logs" {
+		c.Next()
+		return
+	}
+
+	var requestBody *operationLogRequestBodyCapture
+	if c.Request.Body != nil {
+		requestBody = &operationLogRequestBodyCapture{ReadCloser: c.Request.Body}
+		c.Request.Body = requestBody
+	}
+	responseWriter := &operationLogResponseWriter{ResponseWriter: c.Writer}
+	c.Writer = responseWriter
+
 	startedAt := time.Now()
 	c.Next()
+	if requestBody != nil && c.Request.Body != nil && (c.Request.ContentLength < 0 || c.Request.ContentLength <= maxRequestBodyBytes) {
+		_, _ = io.Copy(io.Discard, c.Request.Body)
+	}
 
 	operation, shouldRecord := operationLogOperation(c.Request.Method, c.FullPath())
 	if !shouldRecord || s.operationLogs == nil {
@@ -65,7 +117,13 @@ func (s *Server) operationLogMiddleware(c *gin.Context) {
 		OperationType: operationLogType(c.Request.Method, c.FullPath()),
 		Status:        c.Writer.Status(),
 		ErrorCode:     operationLogErrorCode(c, c.Writer.Status()),
-		Request:       operationLogRequestSnapshot(c),
+		Request:       operationLogRequestSnapshot(c, requestBody),
+		Response: auditlog.ResponseSnapshot{
+			Body: auditlog.NewPayloadSnapshot(
+				c.Writer.Header().Get("Content-Type"),
+				responseWriter.body.Bytes(),
+			),
+		},
 	})
 }
 
@@ -100,13 +158,30 @@ func operationLogErrorCode(c *gin.Context, status int) string {
 	return auditlog.ErrorCodeForStatus(status)
 }
 
-func operationLogRequestSnapshot(c *gin.Context) auditlog.RequestSnapshot {
+func operationLogRequestSnapshot(
+	c *gin.Context,
+	requestBody *operationLogRequestBodyCapture,
+) auditlog.RequestSnapshot {
 	query := c.Request.URL.Query()
+	pathParams := make(map[string]string, len(c.Params))
+	for _, parameter := range c.Params {
+		pathParams[parameter.Key] = parameter.Value
+	}
+	var rawBody []byte
+	if requestBody != nil {
+		rawBody = requestBody.body.Bytes()
+	}
+	body := auditlog.NewPayloadSnapshot(c.Request.Header.Get("Content-Type"), rawBody)
 	return auditlog.RequestSnapshot{
 		Source:              auditlog.RequestSourceAPI,
-		BodyPresent:         c.Request.Body != nil && c.Request.ContentLength != 0,
+		Method:              c.Request.Method,
+		Path:                c.Request.URL.Path,
+		RawQuery:            c.Request.URL.RawQuery,
+		PathParams:          pathParams,
+		BodyPresent:         body.Present || c.Request.ContentLength != 0,
 		AliasFilterApplied:  strings.TrimSpace(query.Get("alias")) != "",
 		PaginationRequested: query.Has("limit") || query.Has("days") || query.Has("before_uid"),
+		Body:                body,
 	}
 }
 
@@ -123,13 +198,13 @@ func (s *Server) recordScheduledAliasAutomationRun(run aliasAutomationScheduledR
 	}
 	status, level := scheduledAliasAutomationLogStatus(run)
 	_, _ = s.operationLogs.Record(auditlog.RecordInput{
-		RequestID: auditlog.NewRequestID(),
-		Duration:  run.Duration,
-		Level:     level,
+		RequestID:     auditlog.NewRequestID(),
+		Duration:      run.Duration,
+		Level:         level,
 		OperationType: "scheduled_alias_automation",
-		Operation: "定时执行别名自动化",
-		Status:    status,
-		ErrorCode: scheduledAliasAutomationLogErrorCode(run, status),
+		Operation:     "定时执行别名自动化",
+		Status:        status,
+		ErrorCode:     scheduledAliasAutomationLogErrorCode(run, status),
 		Request: auditlog.RequestSnapshot{
 			Source: auditlog.RequestSourceScheduler,
 		},

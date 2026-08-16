@@ -100,7 +100,7 @@ describe("API client", () => {
     expect(accounts[0]).not.toHaveProperty("cookies");
   });
 
-  it("loads privacy-safe operation log entries and strips unexpected fields", async () => {
+  it("loads complete operation log payloads and strips fields outside the contract", async () => {
     const fetcher = vi.fn(() =>
       Promise.resolve(
         jsonResponse({
@@ -111,20 +111,38 @@ describe("API client", () => {
                 duration_ms: 842,
                 level: "info",
                 operation: "读取收件箱",
-                operation_type: "inbox",
+                operation_type: "accounts_id_aliases_batch",
                 request: {
-                  account_id: "audit-private-account",
-                  alias: "audit-private-alias@example.test",
                   alias_filter_applied: false,
-                  body_present: false,
+                  authorization: "must-not-reach-ui-state",
+                  body: {
+                    content_type: "application/json",
+                    encoding: "utf8",
+                    present: true,
+                    value: '{"account_id":"audit-private-account"}',
+                  },
+                  body_present: true,
+                  method: "POST",
                   pagination_requested: true,
+                  path: "/api/accounts/audit-private-account/aliases/batch",
+                  path_params: { id: "audit-private-account" },
+                  raw_query: "limit=20&alias=audit-private-alias%40example.test",
                   source: "api",
                 },
-                request_body: "must-not-reach-ui-state",
+                request_headers: { authorization: "must-not-reach-ui-state" },
                 request_id: "9b802520ea894105a6c3401168b7f7f1",
-                response: { raw_body: "must-not-reach-ui-state", success: true },
+                response: {
+                  body: {
+                    content_type: "application/json; charset=utf-8",
+                    encoding: "utf8",
+                    present: true,
+                    value: '{"success":true,"data":{"created":1}}',
+                  },
+                  response_headers: { "set-cookie": "must-not-reach-ui-state" },
+                  success: true,
+                },
                 retry_count: 0,
-                schema_version: 2,
+                schema_version: 3,
                 status: 200,
                 timestamp: "2026-08-02T08:30:00Z",
               },
@@ -151,27 +169,46 @@ describe("API client", () => {
           error_code: "",
           level: "info",
           operation: "读取收件箱",
-          operation_type: "inbox",
+          operation_type: "accounts_id_aliases_batch",
           request: {
             alias_filter_applied: false,
-            body_present: false,
+            body: {
+              content_type: "application/json",
+              encoding: "utf8",
+              present: true,
+              value: '{"account_id":"audit-private-account"}',
+            },
+            body_present: true,
+            method: "POST",
             pagination_requested: true,
+            path: "/api/accounts/audit-private-account/aliases/batch",
+            path_params: { id: "audit-private-account" },
+            raw_query: "limit=20&alias=audit-private-alias%40example.test",
             source: "api",
           },
           request_id: "9b802520ea894105a6c3401168b7f7f1",
-          response: { created_count: 0, failed_count: 0, success: true },
+          response: {
+            body: {
+              content_type: "application/json; charset=utf-8",
+              encoding: "utf8",
+              present: true,
+              value: '{"success":true,"data":{"created":1}}',
+            },
+            created_count: 0,
+            failed_count: 0,
+            success: true,
+          },
           retry_count: 0,
-          schema_version: 2,
+          schema_version: 3,
           status: 200,
           timestamp: "2026-08-02T08:30:00Z",
         },
       ],
       retention_days: 7,
     });
-    expect(logs.entries[0]).not.toHaveProperty("request_body");
-    expect(logs.entries[0].request).not.toHaveProperty("account_id");
-    expect(logs.entries[0].request).not.toHaveProperty("alias");
-    expect(logs.entries[0].response).not.toHaveProperty("raw_body");
+    expect(logs.entries[0]).not.toHaveProperty("request_headers");
+    expect(logs.entries[0].request).not.toHaveProperty("authorization");
+    expect(logs.entries[0].response).not.toHaveProperty("response_headers");
   });
 
   it("serializes mutation data in the JSON body and encodes dynamic path segments", async () => {

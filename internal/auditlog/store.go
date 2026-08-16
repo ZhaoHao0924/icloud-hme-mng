@@ -1,14 +1,17 @@
-// Package auditlog stores a bounded, privacy-safe operation history.
+// Package auditlog stores a bounded operation history with raw API payloads.
 package auditlog
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,11 +19,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
 	// SchemaVersion identifies the current on-disk audit entry shape.
-	SchemaVersion = 2
+	SchemaVersion = 3
 
 	// RetentionDays is the fixed on-disk retention window for operation logs.
 	RetentionDays = 7
@@ -35,22 +39,25 @@ const (
 	RequestSourceScheduler = "scheduler"
 	RequestSourceLegacy    = "legacy"
 
+	PayloadEncodingUTF8   = "utf8"
+	PayloadEncodingBase64 = "base64"
+
 	OperationTypeLegacy      = "legacy"
 	OperationTypeUnspecified = "unspecified"
 
-	ErrorCodeValidationFailed    = "validation_failed"
-	ErrorCodeUnauthorized         = "unauthorized"
-	ErrorCodeForbidden            = "forbidden"
-	ErrorCodeNotFound             = "not_found"
-	ErrorCodeConflict             = "conflict"
-	ErrorCodeRequestTooLarge      = "request_too_large"
-	ErrorCodeRequestTimeout       = "request_timeout"
-	ErrorCodeRateLimited          = "rate_limited"
-	ErrorCodeUpstreamRejected     = "upstream_rejected"
-	ErrorCodeUpstreamTimeout      = "upstream_timeout"
-	ErrorCodeServiceUnavailable   = "service_unavailable"
-	ErrorCodeInternalFailure      = "internal_failure"
-	ErrorCodePartialResult        = "partial_result"
+	ErrorCodeValidationFailed   = "validation_failed"
+	ErrorCodeUnauthorized       = "unauthorized"
+	ErrorCodeForbidden          = "forbidden"
+	ErrorCodeNotFound           = "not_found"
+	ErrorCodeConflict           = "conflict"
+	ErrorCodeRequestTooLarge    = "request_too_large"
+	ErrorCodeRequestTimeout     = "request_timeout"
+	ErrorCodeRateLimited        = "rate_limited"
+	ErrorCodeUpstreamRejected   = "upstream_rejected"
+	ErrorCodeUpstreamTimeout    = "upstream_timeout"
+	ErrorCodeServiceUnavailable = "service_unavailable"
+	ErrorCodeInternalFailure    = "internal_failure"
+	ErrorCodePartialResult      = "partial_result"
 )
 
 var retention = time.Duration(RetentionDays) * 24 * time.Hour
@@ -75,7 +82,7 @@ var allowedOperationTypes = map[string]struct{}{
 	"accounts_id_alias_automation_run":       {},
 	"accounts_id_alias_creation_history":     {},
 	"accounts_id_alias_creation_history_csv": {},
-	"accounts_id_aliases_batch":               {},
+	"accounts_id_aliases_batch":              {},
 	"create":                                 {},
 	"inbox":                                  {},
 	"inbox_messages_id":                      {},
@@ -90,8 +97,8 @@ var allowedOperationTypes = map[string]struct{}{
 	"notifications_webhook":                  {},
 	"notifications_webhook_test":             {},
 	"scheduled_alias_automation":             {},
-	OperationTypeLegacy:                        {},
-	OperationTypeUnspecified:                   {},
+	OperationTypeLegacy:                      {},
+	OperationTypeUnspecified:                 {},
 }
 
 // Level is the severity assigned to a completed operation.
@@ -103,25 +110,40 @@ const (
 	LevelError   Level = "error"
 )
 
-// RequestSnapshot is a fixed, allowlisted summary of an operation request.
-// It deliberately cannot contain identifiers, query values, headers, or body data.
+// PayloadSnapshot preserves an HTTP body. UTF-8 data is stored directly and
+// arbitrary binary data is stored as base64 so the original bytes can be read.
+type PayloadSnapshot struct {
+	Present     bool   `json:"present"`
+	ContentType string `json:"content_type"`
+	Encoding    string `json:"encoding"`
+	Value       string `json:"value"`
+}
+
+// RequestSnapshot contains the original management API request parameters.
+// HTTP headers are deliberately excluded; method, path, query, path parameters,
+// and the request body are retained as received by the server.
 type RequestSnapshot struct {
-	Source              string `json:"source"`
-	BodyPresent         bool   `json:"body_present"`
-	AliasFilterApplied  bool   `json:"alias_filter_applied"`
-	PaginationRequested bool   `json:"pagination_requested"`
+	Source              string            `json:"source"`
+	Method              string            `json:"method"`
+	Path                string            `json:"path"`
+	RawQuery            string            `json:"raw_query"`
+	PathParams          map[string]string `json:"path_params"`
+	BodyPresent         bool              `json:"body_present"`
+	AliasFilterApplied  bool              `json:"alias_filter_applied"`
+	PaginationRequested bool              `json:"pagination_requested"`
+	Body                PayloadSnapshot   `json:"body"`
 }
 
-// ResponseSnapshot is a fixed, allowlisted summary of an operation response.
-// It deliberately cannot contain response data or upstream payloads.
+// ResponseSnapshot contains the response body returned by the management API.
 type ResponseSnapshot struct {
-	Success      bool `json:"success"`
-	CreatedCount int  `json:"created_count,omitempty"`
-	FailedCount  int  `json:"failed_count,omitempty"`
+	Success      bool            `json:"success"`
+	CreatedCount int             `json:"created_count,omitempty"`
+	FailedCount  int             `json:"failed_count,omitempty"`
+	Body         PayloadSnapshot `json:"body"`
 }
 
-// Entry is a privacy-safe operation record. It intentionally has no request body,
-// query string, account identifier, email address, credential, or upstream response.
+// Entry is an operation record. Schema version 3 entries may contain credentials,
+// email content, account identifiers, and other sensitive values from API payloads.
 type Entry struct {
 	SchemaVersion int              `json:"schema_version"`
 	Timestamp     time.Time        `json:"timestamp"`
@@ -137,8 +159,7 @@ type Entry struct {
 	Response      ResponseSnapshot `json:"response"`
 }
 
-// RecordInput is the narrow input accepted by Store.Record. Its snapshots only
-// expose fixed, non-sensitive booleans and counters.
+// RecordInput is the input accepted by Store.Record.
 type RecordInput struct {
 	RequestID     string
 	Level         Level
@@ -522,6 +543,11 @@ func normalizedRequestSnapshot(snapshot RequestSnapshot, defaultSource string) R
 	if snapshot.Source != RequestSourceAPI && snapshot.Source != RequestSourceScheduler && snapshot.Source != RequestSourceLegacy {
 		snapshot.Source = defaultSource
 	}
+	if snapshot.PathParams == nil {
+		snapshot.PathParams = map[string]string{}
+	}
+	snapshot.Body = normalizedPayloadSnapshot(snapshot.Body)
+	snapshot.BodyPresent = snapshot.BodyPresent || snapshot.Body.Present
 	return snapshot
 }
 
@@ -533,7 +559,49 @@ func normalizedResponseSnapshot(snapshot ResponseSnapshot, status int) ResponseS
 	if snapshot.FailedCount < 0 {
 		snapshot.FailedCount = 0
 	}
+	snapshot.Body = normalizedPayloadSnapshot(snapshot.Body)
 	return snapshot
+}
+
+// NewPayloadSnapshot converts raw HTTP body bytes into a JSON-safe payload.
+func NewPayloadSnapshot(contentType string, raw []byte) PayloadSnapshot {
+	payload := PayloadSnapshot{
+		Present:     len(raw) > 0,
+		ContentType: strings.TrimSpace(contentType),
+	}
+	if len(raw) == 0 {
+		return payload
+	}
+	if utf8.Valid(raw) {
+		payload.Encoding = PayloadEncodingUTF8
+		payload.Value = string(raw)
+		return payload
+	}
+	payload.Encoding = PayloadEncodingBase64
+	payload.Value = base64.StdEncoding.EncodeToString(raw)
+	return payload
+}
+
+func normalizedPayloadSnapshot(payload PayloadSnapshot) PayloadSnapshot {
+	payload.ContentType = strings.TrimSpace(payload.ContentType)
+	if payload.Value != "" {
+		payload.Present = true
+	}
+	if !payload.Present {
+		payload.Encoding = ""
+		payload.Value = ""
+		return payload
+	}
+	switch payload.Encoding {
+	case PayloadEncodingBase64:
+		if _, err := base64.StdEncoding.DecodeString(payload.Value); err != nil {
+			payload.Encoding = PayloadEncodingUTF8
+		}
+	case PayloadEncodingUTF8:
+	default:
+		payload.Encoding = PayloadEncodingUTF8
+	}
+	return payload
 }
 
 func startOfDay(timestamp time.Time) time.Time {
@@ -575,37 +643,45 @@ func readEntries(path string) ([]Entry, error) {
 	defer file.Close()
 
 	entries := make([]Entry, 0)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), 256*1024)
-	for scanner.Scan() {
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 && errors.Is(readErr, io.EOF) {
+			break
+		}
 		var entry Entry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
+		if len(line) > 0 && json.Unmarshal(line, &entry) == nil {
+			if !entry.Timestamp.IsZero() && strings.TrimSpace(entry.Operation) != "" {
+				entry.Timestamp = entry.Timestamp.UTC()
+				entry.Level = normalizedLevel(entry.Level)
+				if entry.DurationMS < 0 {
+					entry.DurationMS = 0
+				}
+				entry.RetryCount = normalizedRetryCount(entry.RetryCount)
+				entry.ErrorCode = normalizedErrorCode(entry.ErrorCode)
+				if entry.SchemaVersion <= 0 {
+					entry.SchemaVersion = 1
+				}
+				if entry.SchemaVersion == 1 {
+					entry.OperationType = OperationTypeLegacy
+					entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceLegacy)
+					entry.RequestID = ""
+				} else {
+					entry.OperationType = normalizedOperationType(entry.OperationType)
+					entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceAPI)
+					entry.RequestID = sanitizedStoredRequestID(entry.RequestID)
+				}
+				entry.Response = normalizedResponseSnapshot(entry.Response, entry.Status)
+				entries = append(entries, entry)
+			}
 		}
-		if entry.Timestamp.IsZero() || strings.TrimSpace(entry.Operation) == "" {
-			continue
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		entry.Timestamp = entry.Timestamp.UTC()
-		entry.Level = normalizedLevel(entry.Level)
-		if entry.DurationMS < 0 {
-			entry.DurationMS = 0
+		if readErr != nil {
+			return nil, fmt.Errorf("read operation log: %w", readErr)
 		}
-		entry.RetryCount = normalizedRetryCount(entry.RetryCount)
-		entry.ErrorCode = normalizedErrorCode(entry.ErrorCode)
-		if entry.SchemaVersion <= 0 {
-			entry.SchemaVersion = 1
-		}
-		if entry.SchemaVersion < SchemaVersion {
-			entry.OperationType = OperationTypeLegacy
-			entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceLegacy)
-			entry.RequestID = ""
-		} else {
-			entry.OperationType = normalizedOperationType(entry.OperationType)
-			entry.Request = normalizedRequestSnapshot(entry.Request, RequestSourceAPI)
-			entry.RequestID = sanitizedStoredRequestID(entry.RequestID)
-		}
-		entry.Response = normalizedResponseSnapshot(entry.Response, entry.Status)
-		entries = append(entries, entry)
 	}
 	// A damaged line must not make the retained history unavailable.
 	return entries, nil

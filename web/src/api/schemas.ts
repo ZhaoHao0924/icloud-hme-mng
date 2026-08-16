@@ -285,11 +285,32 @@ export const operationLogTypeSchema = z.enum([
   "unspecified",
 ]);
 
+const emptyOperationLogPayloadSnapshot = {
+  content_type: "",
+  encoding: "" as const,
+  present: false,
+  value: "",
+};
+
+export const operationLogPayloadSnapshotSchema = z
+  .object({
+    content_type: z.string().optional().default(""),
+    encoding: z.enum(["", "utf8", "base64"]).optional().default(""),
+    present: z.boolean().optional().default(false),
+    value: z.string().optional().default(""),
+  })
+  .strip();
+
 export const operationLogRequestSnapshotSchema = z
   .object({
     alias_filter_applied: z.boolean(),
+    body: operationLogPayloadSnapshotSchema.optional().default(emptyOperationLogPayloadSnapshot),
     body_present: z.boolean(),
+    method: z.string().optional().default(""),
     pagination_requested: z.boolean(),
+    path: z.string().optional().default(""),
+    path_params: z.record(z.string(), z.string()).optional().default({}),
+    raw_query: z.string().optional().default(""),
     source: z.enum(["api", "scheduler", "legacy"]),
   })
   .strip();
@@ -298,6 +319,7 @@ export const operationLogResponseSnapshotSchema = z
   .object({
     created_count: z.number().int().nonnegative().optional().default(0),
     failed_count: z.number().int().nonnegative().optional().default(0),
+    body: operationLogPayloadSnapshotSchema.optional().default(emptyOperationLogPayloadSnapshot),
     success: z.boolean(),
   })
   .strip();

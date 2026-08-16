@@ -1,5 +1,6 @@
 import {
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
   Database,
   Info,
@@ -56,6 +57,39 @@ function formatOperationLogTime(timestamp: string) {
 
 function formatOperationLogDuration(durationMS: number) {
   return durationMS >= 1_000 ? `${(durationMS / 1_000).toFixed(1)} s` : `${durationMS} ms`;
+}
+
+type OperationLogPayload = OperationLogEntry["request"]["body"];
+
+function formatOperationLogPathParams(pathParams: Record<string, string>) {
+  const entries = Object.entries(pathParams).sort(([left], [right]) => left.localeCompare(right));
+  return entries.length > 0
+    ? entries.map(([key, value]) => `${key}=${value}`).join("\n")
+    : "（无）";
+}
+
+function operationLogPayloadValue(payload: OperationLogPayload) {
+  if (!payload.present) return "（无）";
+  if (payload.value === "") return "（空）";
+  return payload.encoding === "base64" ? `[Base64]\n${payload.value}` : payload.value;
+}
+
+function OperationLogPayloadBlock({
+  label,
+  payload,
+}: {
+  label: string;
+  payload: OperationLogPayload;
+}) {
+  return (
+    <div className="settings-log-payload-block">
+      <span className="settings-log-payload-meta">
+        {label} · {payload.content_type || "未声明类型"}
+        {payload.encoding ? ` · ${payload.encoding}` : ""}
+      </span>
+      <pre className="settings-log-payload">{operationLogPayloadValue(payload)}</pre>
+    </div>
+  );
 }
 
 export function SettingsPage() {
@@ -568,6 +602,63 @@ export function SettingsPage() {
                           <code className="settings-log-request-id">{entry.request_id}</code>
                         ) : null}
                       </div>
+                      <details className="settings-log-details">
+                        <summary>
+                          <ChevronDown size={15} aria-hidden="true" />
+                          <span>查看请求参数原值与原始响应</span>
+                        </summary>
+                        <div className="settings-log-detail-grid">
+                          <section className="settings-log-detail-panel" aria-label="请求参数原值">
+                            <h4>请求参数原值</h4>
+                            <dl className="settings-log-detail-list">
+                              <div>
+                                <dt>方法</dt>
+                                <dd>
+                                  <code>{entry.request.method || "（无）"}</code>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>路径</dt>
+                                <dd>
+                                  <code>{entry.request.path || "（无）"}</code>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>原始 query</dt>
+                                <dd>
+                                  <code>{entry.request.raw_query || "（无）"}</code>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>路径参数</dt>
+                                <dd>
+                                  <pre className="settings-log-inline-value">
+                                    {formatOperationLogPathParams(entry.request.path_params)}
+                                  </pre>
+                                </dd>
+                              </div>
+                            </dl>
+                            <OperationLogPayloadBlock label="请求体" payload={entry.request.body} />
+                          </section>
+                          <section className="settings-log-detail-panel" aria-label="原始响应">
+                            <h4>原始响应</h4>
+                            <dl className="settings-log-detail-list">
+                              <div>
+                                <dt>HTTP 状态</dt>
+                                <dd>{entry.status}</dd>
+                              </div>
+                              <div>
+                                <dt>结果</dt>
+                                <dd>{entry.response.success ? "成功" : "失败"}</dd>
+                              </div>
+                            </dl>
+                            <OperationLogPayloadBlock
+                              label="响应体"
+                              payload={entry.response.body}
+                            />
+                          </section>
+                        </div>
+                      </details>
                     </li>
                   );
                 })}
